@@ -208,17 +208,17 @@ class TestDynamicThresholdCalibrator:
     def test_calibrator_initialization(self):
         """Test that calibrator initializes correctly."""
         calibrator = DynamicThresholdCalibrator(
-            target_sparse_ratio=0.5,
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
             threshold_trials=[1e-4, 1e-3, 1e-2],
         )
 
-        assert calibrator.target_sparse_ratio == 0.5
+        assert calibrator.target_sparse_ratio == {"prefill": 0.5, "decode": 0.5}
         assert len(calibrator.threshold_trials) == 3
 
     def test_calibrator_default_threshold_trials(self):
         """Test that calibrator has default threshold trials."""
         calibrator = DynamicThresholdCalibrator(
-            target_sparse_ratio=0.5,
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
         )
 
         # Should have default threshold trials
@@ -344,7 +344,7 @@ class TestCalibrationIntegration:
         config = {
             "sparse_cfg": {
                 "calibration": {
-                    "target_sparse_ratio": 0.5,
+                    "target_sparse_ratio": {"prefill": 0.5, "decode": 0.5},
                     "samples": 4,
                     "max_seqlen": 1024,
                 },
@@ -384,58 +384,94 @@ class TestCalibrationIntegration:
         """Test CalibrationConfig validation."""
         # Valid config
         config = CalibrationConfig(
-            target_sparse_ratio=0.5,
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
             samples=48,
             max_seqlen=32768,
         )
-        assert config.target_sparse_ratio == 0.5
+        assert config.target_sparse_ratio == {"prefill": 0.5, "decode": 0.5}
         assert config.samples == 48
         assert config.max_seqlen == 32768
 
-        # Invalid target_sparse_ratio (> 1.0)
-        with pytest.raises(ValueError, match="target_sparse_ratio must be between"):
-            CalibrationConfig(target_sparse_ratio=1.5, samples=48, max_seqlen=32768)
+        # Invalid target_sparse_ratio (value > 1.0)
+        with pytest.raises(ValueError, match="target_sparse_ratio"):
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": 1.5, "decode": 0.5},
+                samples=48,
+                max_seqlen=32768,
+            )
 
-        # Invalid target_sparse_ratio (< 0.0)
-        with pytest.raises(ValueError, match="target_sparse_ratio must be between"):
-            CalibrationConfig(target_sparse_ratio=-0.1, samples=48, max_seqlen=32768)
+        # Invalid target_sparse_ratio (value < 0.0)
+        with pytest.raises(ValueError, match="target_sparse_ratio"):
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": -0.1, "decode": 0.5},
+                samples=48,
+                max_seqlen=32768,
+            )
+
+        # Invalid target_sparse_ratio (missing key)
+        with pytest.raises(ValueError, match="target_sparse_ratio must have exactly keys"):
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": 0.5},
+                samples=48,
+                max_seqlen=32768,
+            )
 
         # Invalid samples
         with pytest.raises(ValueError, match="samples must be positive"):
-            CalibrationConfig(target_sparse_ratio=0.5, samples=0, max_seqlen=32768)
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
+                samples=0,
+                max_seqlen=32768,
+            )
 
         # Invalid max_seqlen
         with pytest.raises(ValueError, match="max_seqlen must be >= 1024"):
-            CalibrationConfig(target_sparse_ratio=0.5, samples=48, max_seqlen=512)
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
+                samples=48,
+                max_seqlen=512,
+            )
 
     def test_threshold_trials_validation(self):
         """Test threshold_trials validation."""
         # Valid custom threshold_trials
         config = CalibrationConfig(
-            target_sparse_ratio=0.5,
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
             threshold_trials=[1e-5, 1e-4, 1e-3, 1e-2],
         )
         assert config.threshold_trials == [1e-5, 1e-4, 1e-3, 1e-2]
 
         # None (use defaults)
-        config_default = CalibrationConfig(target_sparse_ratio=0.5)
+        config_default = CalibrationConfig(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
         assert config_default.threshold_trials is None
 
         # Invalid: empty list
         with pytest.raises(ValueError, match="threshold_trials must not be empty"):
-            CalibrationConfig(threshold_trials=[])
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
+                threshold_trials=[],
+            )
 
         # Invalid: threshold out of range (>= 1.0)
         with pytest.raises(ValueError, match="must be in range"):
-            CalibrationConfig(threshold_trials=[1e-4, 1.0])
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
+                threshold_trials=[1e-4, 1.0],
+            )
 
         # Invalid: threshold out of range (<= 0)
         with pytest.raises(ValueError, match="must be in range"):
-            CalibrationConfig(threshold_trials=[1e-4, 0])
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
+                threshold_trials=[1e-4, 0],
+            )
 
         # Invalid: not a list (Pydantic raises ValidationError, not ValueError)
         with pytest.raises(ValidationError, match="Input should be a valid list"):
-            CalibrationConfig(threshold_trials=1e-4)
+            CalibrationConfig(
+                target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
+                threshold_trials=1e-4,
+            )
 
 
 class TestDynamicThresholdCalibratorMethods:
@@ -462,7 +498,7 @@ class TestDynamicThresholdCalibratorMethods:
         assert len(modules) > 0
 
         # Create calibrator and set threshold
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio=0.5)
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
         calibrator._set_threshold(modules, 0.05)
 
         # Verify threshold was set
@@ -487,7 +523,7 @@ class TestDynamicThresholdCalibratorMethods:
 
         modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
 
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio=0.5)
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
 
         # Enable calibration mode
         calibrator._enable_calibration_mode(modules)
@@ -523,7 +559,7 @@ class TestDynamicThresholdCalibratorMethods:
 
         modules = [m for m in sparse_model.modules() if isinstance(m, SparseAttentionModule)]
 
-        calibrator = DynamicThresholdCalibrator(target_sparse_ratio=0.5)
+        calibrator = DynamicThresholdCalibrator(target_sparse_ratio={"prefill": 0.5, "decode": 0.5})
 
         # Extract stats without running any forward passes
         stats = calibrator._extract_calibration_stats(modules)
@@ -534,12 +570,12 @@ class TestDynamicThresholdCalibratorMethods:
     def test_calibrator_with_single_sample(self):
         """Test calibrator edge case with only one sample."""
         calibrator = DynamicThresholdCalibrator(
-            target_sparse_ratio=0.5,
+            target_sparse_ratio={"prefill": 0.5, "decode": 0.5},
             threshold_trials=[0.001, 0.01, 0.1],
         )
 
         # Even with one sample, regression should work
-        assert calibrator.target_sparse_ratio == 0.5
+        assert calibrator.target_sparse_ratio == {"prefill": 0.5, "decode": 0.5}
         assert len(calibrator.threshold_trials) == 3
 
 
@@ -574,7 +610,7 @@ class TestCalibrateFunction:
         config = {
             "sparse_cfg": {
                 "calibration": {
-                    "target_sparse_ratio": 0.3,
+                    "target_sparse_ratio": {"prefill": 0.3, "decode": 0.3},
                     "samples": 12,
                     "max_seqlen": 2048,
                 },
@@ -587,7 +623,7 @@ class TestCalibrateFunction:
         calib_config = _extract_calibration_config(config)
 
         assert calib_config is not None
-        assert calib_config.target_sparse_ratio == 0.3
+        assert calib_config.target_sparse_ratio == {"prefill": 0.3, "decode": 0.3}
         assert calib_config.samples == 12
         assert calib_config.max_seqlen == 2048
 

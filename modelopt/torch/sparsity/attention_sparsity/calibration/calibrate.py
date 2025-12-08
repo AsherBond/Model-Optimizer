@@ -82,23 +82,23 @@ def _extract_calibration_config(config: dict[str, Any]) -> CalibrationConfig | N
 def create_calibration_forward_loop(
     calibration_data: list[dict[str, Any]],
     tokenizer_name_or_path: str,
-    batch_size: int = 1,
+    decode_tokens: int = 10,
 ) -> Callable:
     """Create forward loop for calibration.
 
     Args:
         calibration_data: List of samples with 'input' and 'length' fields
         tokenizer_name_or_path: HuggingFace tokenizer path
-        batch_size: Batch size (currently unused, always 1)
+        decode_tokens: Default max_new_tokens for decode phase
 
     Returns:
-        Forward loop function that takes model as argument
+        Forward loop function that takes (model, max_new_tokens) as arguments.
     """
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
     if not tokenizer.pad_token:
         tokenizer.pad_token = tokenizer.eos_token
 
-    def forward_loop(model: nn.Module) -> None:
+    def forward_loop(model: nn.Module, max_new_tokens: int = decode_tokens) -> None:
         device = next(model.parameters()).device
 
         for sample in calibration_data:
@@ -108,7 +108,11 @@ def create_calibration_forward_loop(
             inputs = {k: v.to(device) for k, v in inputs.items()}
 
             with torch.no_grad():
-                model(**inputs)
+                model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
 
     return forward_loop
 
@@ -116,15 +120,16 @@ def create_calibration_forward_loop(
 def calibrate_sparse_attention(
     model: nn.Module,
     config: dict[str, Any],
-    forward_loop: Callable | None = None,
 ) -> dict[str, Any]:
     """Calibrate sparse attention parameters for optimal sparsity.
+
+    Runs two-phase calibration:
+    1. Prefill phase: Direct forward passes to measure prefill sparsity
+    2. Decode phase: Generation to measure decode sparsity (averaged per sample)
 
     Args:
         model: Model with sparse attention modules
         config: Sparse attention configuration dict
-        forward_loop: Callable that forwards calibration data through model.
-                     If None, auto-generates RULER dataset.
 
     Returns:
         Dictionary with calibration results
@@ -136,20 +141,6 @@ def calibrate_sparse_attention(
     if calib_config is None:
         return {}
 
-    # Generate forward_loop if not provided
-    if not forward_loop:
-        tokenizer = _extract_tokenizer_from_model(model)
-        builder = RulerDatasetBuilder(
-            samples=calib_config.samples,
-            max_seqlen=calib_config.max_seqlen,
-            tokenizer_name_or_path=tokenizer,
-            num_length_bins=calib_config.num_length_bins,
-            max_length_filter=int(calib_config.max_seqlen * 1.5),
-        )
-        calibration_data = builder.build_calibration_dataset()
-        print(f"Generated {len(calibration_data)} calibration samples")
-        forward_loop = create_calibration_forward_loop(calibration_data, tokenizer)
-
     # Get sparse attention modules
     sparse_modules = [
         (name, m) for name, m in model.named_modules() if isinstance(m, SparseAttentionModule)
@@ -159,7 +150,24 @@ def calibrate_sparse_attention(
         print("No sparse attention modules found for calibration")
         return {}
 
-    print(f"Calibrating {len(sparse_modules)} sparse attention modules together...")
+    print(f"Calibrating {len(sparse_modules)} sparse attention modules...")
+
+    # Two-phase calibration
+    tokenizer = _extract_tokenizer_from_model(model)
+    builder = RulerDatasetBuilder(
+        samples=calib_config.samples,
+        max_seqlen=calib_config.max_seqlen,
+        tokenizer_name_or_path=tokenizer,
+        num_length_bins=calib_config.num_length_bins,
+        max_length_filter=int(calib_config.max_seqlen * 1.5),
+    )
+    calibration_data = builder.build_calibration_dataset()
+    print(f"Generated {len(calibration_data)} calibration samples")
+
+    # Create forward loop with decode_tokens as default
+    forward_loop = create_calibration_forward_loop(
+        calibration_data, tokenizer, calib_config.decode_tokens
+    )
 
     # Run calibration
     calibrator = DynamicThresholdCalibrator(
@@ -168,7 +176,7 @@ def calibrate_sparse_attention(
     )
     calibration_result = calibrator.calibrate(model, forward_loop)
 
-    # Print calibration statistics (regardless of success/failure for debugging)
+    # Print calibration statistics
     print("\nCalibration complete!")
     print_sparse_attention_summary(model)
 
@@ -176,11 +184,13 @@ def calibrate_sparse_attention(
         warnings.warn("Calibration did not produce valid results")
         return {}
 
-    # Apply calibrated scale factor to all modules
-    scale_factor = calibration_result["scale_factor"]
-    print(f"\nApplying calibrated scale factor={scale_factor:.6f} to {len(sparse_modules)} modules")
+    # Apply calibrated scale factors to all modules
+    scale_factors = calibration_result["scale_factor"]
+    print(f"\nApplying calibrated scale factors to {len(sparse_modules)} modules:")
+    for phase, sf in scale_factors.items():
+        print(f"  {phase}: {sf:.6f}")
 
     for module_name, module in sparse_modules:
-        module._sparse_method_instance.threshold_scale_factor = scale_factor
+        module._sparse_method_instance.threshold_scale_factor = scale_factors
 
     return {"calibration_results": {name: calibration_result for name, _ in sparse_modules}}

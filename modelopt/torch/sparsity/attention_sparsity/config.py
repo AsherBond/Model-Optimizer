@@ -150,19 +150,26 @@ class CalibrationConfig(ModeloptBaseConfig):
     """Configuration for automatic threshold calibration using RULER dataset.
 
     Calibration learns a dynamic threshold λ = scale_factor / sequence_length that
-    achieves target sparsity. Only supports prefill phase (seq_len > 1).
+    achieves target sparsity for both prefill and decode phases.
     """
 
-    target_sparse_ratio: float = ModeloptField(
-        default=0.5,
+    target_sparse_ratio: dict[str, float] = ModeloptField(
+        default={"prefill": 0.5, "decode": 0.5},
         title="Target sparsity ratio",
-        description="Target ratio of sparse attention blocks (0.0 to 1.0).",
+        description="Target ratio of sparse attention blocks per phase. Dict with 'prefill' and 'decode' keys.",
     )
 
     samples: int = ModeloptField(
         default=24,
         title="Calibration samples",
         description="Total number of RULER samples for calibration (distributed across length bins).",
+    )
+
+    decode_tokens: int = ModeloptField(
+        default=10,
+        title="Decode tokens for calibration",
+        description="Number of tokens to generate per sample for decode phase calibration. "
+        "Sparsity is averaged across these tokens.",
     )
 
     max_seqlen: int = ModeloptField(
@@ -207,9 +214,19 @@ class CalibrationConfig(ModeloptBaseConfig):
     @field_validator("target_sparse_ratio")
     @classmethod
     def validate_target_sparse_ratio(cls, v):
-        """Validate target sparsity ratio is between 0 and 1."""
-        if not 0.0 <= v <= 1.0:
-            raise ValueError(f"target_sparse_ratio must be between 0.0 and 1.0, got {v}")
+        """Validate target sparsity ratio dict has prefill and decode keys with values in [0, 1]."""
+        if not isinstance(v, dict):
+            raise ValueError(f"target_sparse_ratio must be a dict, got {type(v).__name__}")
+        required_keys = {"prefill", "decode"}
+        if set(v.keys()) != required_keys:
+            raise ValueError(
+                f"target_sparse_ratio must have exactly keys {required_keys}, got {set(v.keys())}"
+            )
+        for phase, ratio in v.items():
+            if not isinstance(ratio, (int, float)) or not 0.0 <= ratio <= 1.0:
+                raise ValueError(
+                    f"target_sparse_ratio['{phase}'] must be between 0.0 and 1.0, got {ratio}"
+                )
         return v
 
     @field_validator("samples")
@@ -234,6 +251,14 @@ class CalibrationConfig(ModeloptBaseConfig):
         """Validate num_length_bins is positive."""
         if v <= 0:
             raise ValueError(f"num_length_bins must be positive, got {v}")
+        return v
+
+    @field_validator("decode_tokens")
+    @classmethod
+    def validate_decode_tokens(cls, v):
+        """Validate decode_tokens is positive."""
+        if v <= 0:
+            raise ValueError(f"decode_tokens must be positive, got {v}")
         return v
 
 
@@ -314,8 +339,9 @@ SKIP_SOFTMAX_DEFAULT = {
 SKIP_SOFTMAX_CALIB = {
     "sparse_cfg": {
         "calibration": {
-            "target_sparse_ratio": 0.5,
-            "samples": 128,
+            "target_sparse_ratio": {"prefill": 0.5, "decode": 0.5},
+            # "samples": 128,
+            "samples": 32,
             "max_seqlen": 8192,
         },
         "*attn*": {

@@ -36,22 +36,20 @@ class DynamicThresholdCalibrator:
     2. Use dataset with different lengths and test multiple thresholds
     3. For each sample, find optimal threshold closest to target sparsity
     4. Use linear regression to fit: threshold = a * (1/length)
+
+    Calibrates separate scale factors for prefill and decode phases.
     """
 
     def __init__(
         self,
-        target_sparse_ratio: float = 0.5,
+        target_sparse_ratio: dict[str, float],
         threshold_trials: list[float] | None = None,
     ):
         """Initialize dynamic threshold calibrator.
 
         Args:
-            target_sparse_ratio: Target sparsity ratio (0.0 to 1.0)
+            target_sparse_ratio: Target sparsity ratio per phase, e.g. {"prefill": 0.5, "decode": 0.3}
             threshold_trials: List of thresholds to try during calibration
-
-        Note:
-            Calibration only supports prefill phase (seq_len > 1).
-            Decode phase uses the same calibrated threshold.
         """
         self.target_sparse_ratio = target_sparse_ratio
 
@@ -71,161 +69,205 @@ class DynamicThresholdCalibrator:
             5e-1,
         ]
 
-        # Statistics tracking
-        self.sparsity_results = []
+        # Statistics tracking per phase: {phase: {sample_idx: {length, threshold_sparsities}}}
+        self.sparsity_results: dict[str, dict[int, dict]] = {"prefill": {}, "decode": {}}
 
-    def calibrate(self, model: nn.Module, forward_loop: Callable) -> dict[str, Any]:
-        """Find optimal 'a' parameter for length-based threshold.
-
-        Algorithm:
-            1. Test all threshold trials by running forward_loop multiple times
-            2. For each sample, find optimal threshold closest to target sparsity
-            3. Use regression to find 'a' in: threshold = a / length
+    def calibrate(
+        self,
+        model: nn.Module,
+        forward_loop: Callable,
+    ) -> dict[str, Any]:
+        """Two-phase calibration: separate prefill and decode phases.
 
         Args:
             model: The model with sparse attention modules
-            forward_loop: Callable that takes model and forwards calibration data
+            forward_loop: Forward loop callable(model, max_new_tokens=decode_tokens) -> None
+                          Prefill uses max_new_tokens=1, decode uses default (decode_tokens)
+
+        Returns:
+            Dict with scale_factor as {"prefill": float, "decode": float}
         """
-        # Extract attention modules
         attention_modules = [m for m in model.modules() if isinstance(m, SparseAttentionModule)]
 
         if not attention_modules:
             raise ValueError("No sparse attention modules found for calibration")
 
-        print("Starting dynamic threshold calibration")
+        print("Starting two-phase dynamic threshold calibration")
         print(f"Target sparsity: {self.target_sparse_ratio}")
         print(f"Threshold trials: {len(self.threshold_trials)}")
 
-        # Stage 1: Collect sparsity for all sample-threshold pairs
-        print("\nStage 1: Collecting sparsity data...")
-        self.sparsity_results = []
+        # ===== Phase 1: Prefill Calibration =====
+        print("\n--- Phase 1: Prefill Calibration ---")
+        self._set_skip_phases(attention_modules, skip_phases={"decode"})
+        prefill_results: dict[int, dict] = {}
+        num_samples = 0
 
-        # For each threshold, run forward_loop and collect per-sample statistics
-        for threshold_idx, threshold in enumerate(
-            tqdm(self.threshold_trials, desc="Testing thresholds")
-        ):
-            # Set threshold and enable calibration mode
+        for threshold in tqdm(self.threshold_trials, desc="Prefill thresholds"):
             self._set_threshold(attention_modules, threshold)
             self._enable_calibration_mode(attention_modules)
+            self._reset_calibration_stats(attention_modules)
 
-            # Run forward loop and collect stats
             with torch.no_grad():
-                forward_loop(model)
-            per_sample_stats = self._extract_calibration_stats(attention_modules)
+                forward_loop(model, max_new_tokens=1)
+
+            stats = self._extract_calibration_stats(attention_modules)
             self._disable_calibration_mode(attention_modules)
 
-            # Store results
-            for sample_idx, sample_stat in enumerate(per_sample_stats):
-                if threshold_idx == 0:
-                    # Initialize sample entry on first threshold
-                    sample_length = sample_stat.get("sample_length", 0)
-                    if sample_length > 0:
-                        self.sparsity_results.append(
-                            {
-                                "sample_index": sample_idx,
-                                "length": sample_length,
-                                "threshold_sparsities": {},
-                            }
-                        )
+            # Derive num_samples from first threshold run
+            if num_samples == 0:
+                num_samples = len(stats)
 
-                # Add sparsity for this threshold
-                if sample_idx < len(self.sparsity_results):
-                    sparsity = sample_stat.get("sparsity", 0.0)
-                    self.sparsity_results[sample_idx]["threshold_sparsities"][threshold] = sparsity
+            for idx, stat in enumerate(stats):
+                if idx not in prefill_results:
+                    prefill_results[idx] = {
+                        "length": stat["sample_length"],
+                        "threshold_sparsities": {},
+                    }
+                prefill_results[idx]["threshold_sparsities"][threshold] = stat["sparsity"]
 
-        if not self.sparsity_results:
-            warnings.warn("No valid sparsity measurements collected during calibration")
+        print(f"Collected {len(prefill_results)} prefill samples")
+
+        # ===== Phase 2: Decode Calibration =====
+        print("\n--- Phase 2: Decode Calibration ---")
+        self._set_skip_phases(attention_modules, skip_phases={"prefill"})
+        decode_results: dict[int, dict] = {}
+        decode_tokens = 0
+
+        for threshold in tqdm(self.threshold_trials, desc="Decode thresholds"):
+            self._set_threshold(attention_modules, threshold)
+            self._enable_calibration_mode(attention_modules)
+            self._reset_calibration_stats(attention_modules)
+
+            with torch.no_grad():
+                forward_loop(model)  # Uses default max_new_tokens (decode_tokens)
+
+            raw_stats = self._extract_calibration_stats(attention_modules)
+            self._disable_calibration_mode(attention_modules)
+
+            # Derive decode_tokens from first threshold run
+            if decode_tokens == 0 and num_samples > 0:
+                decode_tokens = len(raw_stats) // num_samples
+
+            # Average decode stats per sample
+            stats = self._average_decode_stats(raw_stats, num_samples, decode_tokens)
+
+            for idx, stat in enumerate(stats):
+                if idx not in decode_results:
+                    decode_results[idx] = {
+                        "length": stat["sample_length"],
+                        "threshold_sparsities": {},
+                    }
+                decode_results[idx]["threshold_sparsities"][threshold] = stat["sparsity"]
+
+        print(f"Collected {len(decode_results)} decode samples (averaged)")
+
+        # ===== Compute Scale Factors =====
+        print("\n--- Computing Scale Factors ---")
+        scale_factors: dict[str, float] = {}
+        phase_results: dict[str, dict] = {}
+
+        # Store results for _compute_phase_scale_factor
+        self.sparsity_results = {"prefill": prefill_results, "decode": decode_results}
+
+        for phase in ("prefill", "decode"):
+            result = self._compute_phase_scale_factor(phase)
+            if result:
+                scale_factors[phase] = result["scale_factor"]
+                phase_results[phase] = result
+
+        if not scale_factors:
+            warnings.warn("Calibration did not produce valid results for any phase")
             return {}
 
-        print(f"Collected statistics for {len(self.sparsity_results)} samples")
+        # Print results
+        print("\nCalibration Results:")
+        for phase, result in phase_results.items():
+            target = self.target_sparse_ratio[phase]
+            print(f"\n  [{phase.upper()}] (target: {target:.2%})")
+            print(
+                f"    Scale factor: {result['scale_factor']:.6f} (std: {result['scale_factor_std']:.6f})"
+            )
+            print(f"    R-squared: {result['r_squared']:.4f}")
+            print(f"    Achieved sparsity: {result['avg_achieved_sparsity']:.2%}")
 
-        # Stage 2: Find optimal threshold for each sample and compute 'a'
-        print(
-            f"\nStage 2: Finding 'a' parameter for target sparsity {self.target_sparse_ratio:.2f}"
-        )
+        print("\nExample thresholds (λ = scale_factor / length):")
+        for length in [1024, 2048, 4096, 8192]:
+            parts = [f"{phase}: {sf / length:.2e}" for phase, sf in scale_factors.items()]
+            print(f"  Length {length:5d}: {', '.join(parts)}")
+
+        # Clear skip phases
+        self._set_skip_phases(attention_modules, skip_phases=set())
+
+        return {
+            "scale_factor": scale_factors,
+            "phase_results": phase_results,
+            "target_sparsity": self.target_sparse_ratio,
+            "calibration_type": "two_phase_dynamic",
+        }
+
+    def _compute_phase_scale_factor(self, phase: str) -> dict[str, Any] | None:
+        """Compute scale factor for a single phase using linear regression.
+
+        Args:
+            phase: "prefill" or "decode"
+
+        Returns:
+            Dict with scale_factor, r_squared, etc., or None if insufficient data
+        """
+        results = self.sparsity_results.get(phase, {})
+        if not results:
+            warnings.warn(f"No samples collected for {phase} phase")
+            return None
+
+        target = self.target_sparse_ratio[phase]
 
         # Find optimal threshold for each sample
         optimal_pairs = []
-        for sample_result in self.sparsity_results:
-            # Find threshold closest to target sparsity
+        for sample_result in results.values():
+            if not sample_result["threshold_sparsities"]:
+                continue
             best_threshold, achieved_sparsity = min(
                 sample_result["threshold_sparsities"].items(),
-                key=lambda item: abs(item[1] - self.target_sparse_ratio),
+                key=lambda item: abs(item[1] - target),
             )
-
             optimal_pairs.append(
                 {
                     "length": sample_result["length"],
                     "optimal_threshold": best_threshold,
                     "achieved_sparsity": achieved_sparsity,
-                    "target_sparsity": self.target_sparse_ratio,
                 }
             )
 
         if not optimal_pairs:
-            warnings.warn(
-                f"No optimal threshold pairs found for target sparsity {self.target_sparse_ratio}. "
-                f"Collected {len(self.sparsity_results)} samples but none achieved target sparsity."
-            )
-            return {}
+            warnings.warn(f"No optimal threshold pairs found for {phase} phase")
+            return None
 
         # Linear regression: threshold = a * (1/length)
         lengths = np.array([p["length"] for p in optimal_pairs])
         thresholds = np.array([p["optimal_threshold"] for p in optimal_pairs])
 
-        # X = 1/length, Y = threshold
         x = 1.0 / lengths
         y = thresholds
 
-        # Least squares: scale_factor = sum(x*y) / sum(x^2)
-        scale_factor = np.sum(x * y) / np.sum(x**2)
+        scale_factor = float(np.sum(x * y) / np.sum(x**2))
+        scale_factor_std = float(np.std(y * lengths))
 
-        # Calculate statistics
-        scale_factors_per_sample = y * lengths
-        scale_factor_std = np.std(scale_factors_per_sample)
-
-        # Calculate R-squared for quality metric
+        # R-squared
         y_pred = scale_factor * x
         ss_res = np.sum((y - y_pred) ** 2)
         ss_tot = np.sum((y - np.mean(y)) ** 2)
-        r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
+        r_squared = float(1 - (ss_res / ss_tot)) if ss_tot > 0 else 0.0
 
-        # Calculate average achieved sparsity
-        avg_achieved_sparsity = np.mean([p["achieved_sparsity"] for p in optimal_pairs])
-
-        print("\nCalibration Results:")
-        print(f"  Threshold scale factor: {scale_factor:.6f} (std: {scale_factor_std:.6f})")
-        print(f"  R-squared: {r_squared:.4f}")
-        print(
-            f"  Average achieved sparsity: {avg_achieved_sparsity:.2%} (target: {self.target_sparse_ratio:.2%})"
-        )
-        print(f"\nExample thresholds with λ = {scale_factor:.6f} / length:")
-        for length in [1024, 2048, 4096, 8192, 16384]:
-            print(f"  Length {length:5d}: threshold = {scale_factor / length:.2e}")
-
-        # Apply the calibrated scale factor to modules
-        self._apply_length_based_calibration(attention_modules, scale_factor)
+        avg_achieved_sparsity = float(np.mean([p["achieved_sparsity"] for p in optimal_pairs]))
 
         return {
             "scale_factor": scale_factor,
             "scale_factor_std": scale_factor_std,
             "r_squared": r_squared,
             "num_samples": len(optimal_pairs),
-            "target_sparsity": self.target_sparse_ratio,
             "avg_achieved_sparsity": avg_achieved_sparsity,
             "optimal_pairs": optimal_pairs,
-            "calibration_type": "length_based_dynamic",
         }
-
-    def _apply_length_based_calibration(self, modules: list[nn.Module], scale_factor: float):
-        """Apply calibrated threshold scale factor to modules.
-
-        Args:
-            modules: List of attention modules
-            scale_factor: Calibrated scale factor for λ = scale_factor / length
-        """
-        for module in modules:
-            module._sparse_method_instance.threshold_scale_factor = scale_factor
 
     def _enable_calibration_mode(self, modules: list[nn.Module]):
         """Enable calibration mode on sparse attention modules."""
@@ -292,10 +334,18 @@ class DynamicThresholdCalibrator:
 
             avg_sparsity = np.mean(sparsities) if sparsities else 0.0
 
+            # Get phase from first module's stats (all modules process same sample)
+            phase = "unknown"
+            for module_stats in all_per_sample_stats:
+                if sample_idx < len(module_stats) and "phase" in module_stats[sample_idx]:
+                    phase = module_stats[sample_idx]["phase"]
+                    break
+
             aggregated_stats.append(
                 {
                     "sparsity": avg_sparsity,
                     "sample_length": sample_length,
+                    "phase": phase,
                 }
             )
 
@@ -305,3 +355,56 @@ class DynamicThresholdCalibrator:
         """Set threshold on sparse attention modules."""
         for module in modules:
             module._sparse_method_instance.threshold = threshold
+
+    def _set_skip_phases(self, modules: list[nn.Module], skip_phases: set[str]):
+        """Set phases to skip during stats collection."""
+        for module in modules:
+            if module._stats_manager:
+                module._stats_manager.skip_phases = skip_phases
+
+    def _reset_calibration_stats(self, modules: list[nn.Module]):
+        """Reset calibration stats for a fresh collection run."""
+        for module in modules:
+            if module._stats_manager:
+                module._stats_manager.per_sample_stats = []
+
+    def _average_decode_stats(
+        self, stats: list[dict], num_samples: int, decode_tokens: int
+    ) -> list[dict]:
+        """Average decode stats: every decode_tokens entries → 1 entry per sample.
+
+        Args:
+            stats: Flat list of decode statistics (num_samples * decode_tokens entries)
+            num_samples: Number of calibration samples
+            decode_tokens: Number of decode tokens generated per sample
+
+        Returns:
+            List of averaged statistics (num_samples entries)
+        """
+        if len(stats) != num_samples * decode_tokens:
+            warnings.warn(
+                f"Expected {num_samples * decode_tokens} decode stats, got {len(stats)}. "
+                "Results may be inaccurate."
+            )
+
+        averaged = []
+        for i in range(num_samples):
+            start = i * decode_tokens
+            end = start + decode_tokens
+
+            if end > len(stats):
+                break
+
+            sample_stats = stats[start:end]
+            avg_sparsity = np.mean([s["sparsity"] for s in sample_stats])
+            sample_length = sample_stats[0]["sample_length"]
+
+            averaged.append(
+                {
+                    "sparsity": avg_sparsity,
+                    "sample_length": sample_length,
+                    "phase": "decode",
+                }
+            )
+
+        return averaged

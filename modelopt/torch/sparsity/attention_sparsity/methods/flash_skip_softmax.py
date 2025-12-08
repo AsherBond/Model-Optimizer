@@ -51,6 +51,7 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         self.bc = config["bc"]
         self.backend = config["backend"]
         self.is_causal = config["is_causal"]
+        self.num_key_value_groups = config.get("num_key_value_groups", 1)
 
         # Optional parameters not in Pydantic config
         self.enable_correction_factor = config.get("enable_correction_factor", True)
@@ -143,8 +144,9 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         # Calculate threshold
         threshold_scale_factor = getattr(self, "threshold_scale_factor", None)
         if threshold_scale_factor:
-            # Use calibrated dynamic threshold: λ = scale_factor / length
-            log_threshold = np.log(threshold_scale_factor / seq_k)
+            # Use calibrated dynamic threshold: λ = scale_factor[phase] / length
+            sf = threshold_scale_factor[phase]
+            log_threshold = np.log(sf / seq_k)
         else:
             # Use static threshold from config
             log_threshold = np.log(self.threshold)
@@ -209,39 +211,41 @@ class FlashSkipSoftmax(SparseAttentionMethod):
                 attn_weights, 1, self.bc
             )
 
-            # Decode: Single query row attends to all past key blocks
-            # blocked_attn: [batch, heads, 1, 1, num_block_cols, bc=128]
+            # GQA/MQA: reshape to group Q heads by their shared KV head
+            # [batch, heads, 1, 1, num_block_cols, bc] -> [batch, kv_heads, q_per_kv, 1, num_block_cols, bc]
+            num_kv_heads = num_heads // self.num_key_value_groups
+            blocked_attn = blocked_attn.view(
+                batch_size, num_kv_heads, self.num_key_value_groups, seq_q, num_block_cols, self.bc
+            )
 
             # Step 1: Find maximum in each key block
-            # block_max: [batch, heads, 1, 1, num_block_cols]
             block_max = blocked_attn.max(dim=-1)[0]
 
             # Step 2: Track cumulative maximum across key blocks (left to right)
-            # Simulates Flash Attention's online softmax normalization
             block_max_cummax = block_max.cummax(dim=-1)[0]
 
             # Step 3: Calculate correction factor
-            # Tracks how often the maximum increases (needed for Flash Attention rescaling)
             block_max_larger = torch.ones_like(block_max)
             block_max_larger[..., 1:] = block_max[..., 1:] > block_max_cummax[..., :-1]
             correction_factor = float(torch.sum(block_max_larger) / torch.numel(block_max_larger))
 
             # Step 4: Normalize scores by cumulative max
-            # p = log(score) - log(cummax) in log-space
             p = blocked_attn - block_max_cummax[..., None]
 
             # Step 5: Apply threshold and create block mask
             # Keep blocks where at least one element exceeds threshold
             p_larger_than_thresh = p > log_threshold
-            block_mask = p_larger_than_thresh.any(dim=-1, keepdim=False)
+            block_mask = p_larger_than_thresh.any(dim=-1).any(
+                dim=2
+            )  # [batch, kv_heads, 1, num_block_cols]
 
             # Step 6: Expand to element level and remove padding
-            element_mask = block_mask[..., None].expand_as(blocked_attn)
-            element_mask = element_mask.reshape(batch_size, num_heads, 1, padded_seq_k)
-            element_mask = element_mask[:, :, :seq_q, :seq_k]
+            element_mask = block_mask.unsqueeze(2).unsqueeze(-1).expand_as(blocked_attn)
+            element_mask = element_mask.reshape(batch_size, num_heads, seq_q, padded_seq_k)
+            element_mask = element_mask[:, :, :, :seq_k]
 
-            # Step 7: Calculate statistics
-            kept_blocks = block_mask.sum().item() / (batch_size * num_heads)
+            # Step 7: Calculate statistics at KV-head granularity
+            kept_blocks = block_mask.sum().item() / (batch_size * num_kv_heads)
             total_blocks = num_block_cols
             sparsity = 1 - (kept_blocks / total_blocks)
 
@@ -311,17 +315,16 @@ class FlashSkipSoftmax(SparseAttentionMethod):
         threshold_scale_factor = getattr(self, "threshold_scale_factor", None)
 
         if threshold_scale_factor is not None:
-            # Calibrated dynamic threshold
+            # Calibrated dynamic threshold: dict with prefill/decode keys
+            example_lengths = {
+                length: {phase: sf / length for phase, sf in threshold_scale_factor.items()}
+                for length in [1024, 2048, 4096, 8192]
+            }
             return {
                 "type": "dynamic",
                 "scale_factor": threshold_scale_factor,
-                "formula": "λ / length",
-                "example_lengths": {
-                    1024: threshold_scale_factor / 1024,
-                    2048: threshold_scale_factor / 2048,
-                    4096: threshold_scale_factor / 4096,
-                    8192: threshold_scale_factor / 8192,
-                },
+                "formula": "scale_factor[phase] / length",
+                "example_lengths": example_lengths,
             }
         else:
             # Static threshold (single value or phase-specific dict)

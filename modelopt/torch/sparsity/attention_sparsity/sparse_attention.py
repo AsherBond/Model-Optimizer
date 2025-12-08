@@ -118,6 +118,9 @@ class SparseAttentionModule(DynamicModule):
         """Initialize the sparse method instance."""
         method_class = get_sparse_method(self._method)
 
+        # Extract num_key_value_groups for GQA/MQA models (default 1 for MHA)
+        self._method_config["num_key_value_groups"] = getattr(self, "num_key_value_groups", 1)
+
         # Initialize the sparse method instance
         # _method_config is always initialized in set_from_attribute_config
         self._sparse_method_instance = method_class(method_config=self._method_config)  # type: ignore[call-arg]

@@ -41,6 +41,9 @@ class SparseAttentionStatsManager:
         self.enabled = enabled
         self.calibration_mode = False
 
+        # Phases to skip during collection (e.g., {"prefill"} or {"decode"})
+        self.skip_phases: set[str] = set()
+
         # Aggregated stats (running totals across all forward passes)
         self.aggregated_stats: dict = {
             "total_calls": 0,
@@ -63,12 +66,17 @@ class SparseAttentionStatsManager:
         if not self.enabled:
             return
 
+        phase = stats.get("phase", "unknown")
+
+        # Skip collection if phase is in skip list
+        if phase in self.skip_phases:
+            return
+
         # Update aggregated stats
         self.aggregated_stats["total_calls"] += 1
         self.aggregated_stats["total_blocks"] += stats.get("total_blocks", 0)
         self.aggregated_stats["sparse_blocks"] += stats.get("sparse_blocks", 0)
 
-        phase = stats.get("phase", "unknown")
         if phase in self.aggregated_stats["phase_counts"]:
             self.aggregated_stats["phase_counts"][phase] += 1
 
@@ -126,6 +134,7 @@ class SparseAttentionStatsManager:
             "phase_counts": {"prefill": 0, "decode": 0, "unknown": 0},
         }
         self.per_sample_stats = []
+        self.skip_phases = set()
 
     def get_calibration_stats(self) -> list[dict]:
         """Get per-sample calibration statistics.

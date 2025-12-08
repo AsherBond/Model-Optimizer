@@ -20,7 +20,6 @@ from typing import Any
 import torch
 
 from modelopt.torch.opt.conversion import apply_mode
-from modelopt.torch.opt.searcher import ForwardLoop
 
 from .calibration import calibrate_sparse_attention
 from .config import SparseAttentionConfig
@@ -35,11 +34,11 @@ __all__ = [
 def sparsify(
     model: torch.nn.Module,
     config: dict[str, Any] | SparseAttentionConfig,
-    forward_loop: ForwardLoop | None = None,
 ) -> torch.nn.Module:
     """Applies sparse attention optimization to the model in-place.
 
-    This method performs replacement of attention modules with their sparse counterparts.
+    This method performs replacement of attention modules with their sparse counterparts,
+    then runs two-phase calibration (prefill and decode) if calibration is configured.
 
     Args:
         model: A pytorch model
@@ -81,15 +80,16 @@ def sparsify(
 
                 config = {
                     "sparse_cfg": {
+                        "calibration": {
+                            "target_sparse_ratio": {"prefill": 0.5, "decode": 0.5},
+                            "samples": 48,
+                            "max_seqlen": 8192,
+                            "decode_tokens": 10,
+                        },
                         "*attention*": {
                             "method": "flash_skip_softmax",
                             "backend": "pytorch",
                             "enable": True,
-                            "calibration": {  # Enables automatic threshold calibration
-                                "target_sparse_ratio": 0.5,
-                                "samples": 48,
-                                "max_seqlen": 8192,
-                            },
                         },
                         "default": {"enable": False},
                     },
@@ -101,32 +101,6 @@ def sparsify(
 
             This requires the model to be loaded with ``attn_implementation="eager"``.
 
-        forward_loop: Reserved for future use.
-
-            Here are a few examples for correct ``forward_loop`` definitions:
-
-            Example 1:
-
-            .. code-block::
-
-                def forward_loop(model) -> None:
-                    # iterate over the data loader and forward data through the model
-                    for batch in data_loader:
-                        model(batch)
-
-            Example 2:
-
-            .. code-block::
-
-                def forward_loop(model) -> float:
-                    # evaluate the model on the task
-                    return evaluate(model, task, ....)
-
-            .. note::
-
-                Calibration does not require forwarding the entire dataset through the model.
-                Please subsample the dataset or reduce the number of batches if needed.
-
             .. important::
 
                 The model must always be loaded with ``attn_implementation="eager"``
@@ -136,7 +110,7 @@ def sparsify(
 
                     from transformers import AutoModelForCausalLM
 
-                    model = AutoModelForCausalLM.from_pretrained(b
+                    model = AutoModelForCausalLM.from_pretrained(
                         model_path,
                         attn_implementation="eager",  # Required for sparse attention
                         torch_dtype=torch.bfloat16,
@@ -153,25 +127,25 @@ def sparsify(
     )
 
     # Calibrate the sparsity ratio of the attention modules
-    return calibrate(model, config, forward_loop=forward_loop)
+    return calibrate(model, config)
 
 
 def calibrate(
     model: torch.nn.Module,
     config: dict[str, Any] | SparseAttentionConfig,
-    forward_loop: ForwardLoop | None = None,
 ) -> torch.nn.Module:
     """Calibrates sparse attention thresholds based on target sparsity.
+
+    Runs two-phase calibration:
+    1. Prefill phase: Direct forward passes to measure prefill sparsity
+    2. Decode phase: Generation to measure decode sparsity
 
     Args:
         model: Model with sparse attention modules
         config: Sparse attention configuration with calibration settings
-        forward_loop: Optional callable that forwards calibration data through the model.
-            If provided, uses this for calibration data.
-            If None, will auto-generate RULER dataset for calibration.
 
     Returns:
         The calibrated model with optimized sparse attention thresholds.
     """
-    calibrate_sparse_attention(model, config, forward_loop=forward_loop)
+    calibrate_sparse_attention(model, config)
     return model

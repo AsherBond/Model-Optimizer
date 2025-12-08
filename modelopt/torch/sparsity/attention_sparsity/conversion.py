@@ -305,7 +305,11 @@ def _format_threshold(info: dict) -> str:
     """Format threshold info for display."""
     t = info.get("type")
     if t == "dynamic":
-        return f"λ={info.get('scale_factor', 0):.2f}"
+        sf = info.get("scale_factor", 0)
+        if isinstance(sf, dict):
+            parts = [f"{phase}={val:.2f}" for phase, val in sf.items()]
+            return f"λ={{ {', '.join(parts)} }}"
+        return f"λ={sf:.2f}"
     if t == "static":
         v = info.get("value")
         if isinstance(v, dict):
