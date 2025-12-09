@@ -1048,6 +1048,7 @@ def _quantize_awq_lite(
             session=session,
             inputs=inputs,
             intermediate_generated_files=intermediate_generated_files,
+            **kwargs,
         )
 
     output_data = []
@@ -1457,6 +1458,7 @@ def quantize(
                 calibration_eps=calibration_eps,
                 input_shapes_profile=input_shapes_profile,
                 use_external_data_format=use_external_data_format,
+                **kwargs,
             )
         onnx_model = quantize_rtn(
             onnx_model,

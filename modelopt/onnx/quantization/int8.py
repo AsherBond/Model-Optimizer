@@ -260,6 +260,7 @@ def quantize(
             ),
             intermediate_generated_files=intermediate_generated_files,
             kv_quant_mode=kv_quant_mode,
+            **kwargs,
         )
 
         intermediate_generated_files.append(tmp_onnx_path)

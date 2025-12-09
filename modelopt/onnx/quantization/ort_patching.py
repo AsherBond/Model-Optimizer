@@ -1561,6 +1561,7 @@ def _quantize_static(
     extra_options=None,
     intermediate_generated_files: list[str] = [],
     kv_quant_mode: str = "NONE",
+    **kwargs,
 ):
     """Modification: enables TRT custom ops in the calibrator via 'TrtExtraPluginLibraryPaths' in extra_options.
 
@@ -1664,6 +1665,7 @@ def _quantize_static(
                 session=calibrator.infer_session,
                 inputs=list(calibration_data_reader),
                 intermediate_generated_files=intermediate_generated_files,
+                **kwargs,
             )
 
         del calibrator

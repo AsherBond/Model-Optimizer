@@ -240,7 +240,7 @@ def quantize(
     input_shapes_profile: Sequence[dict[str, str]] | None = None,
     direct_io_types: bool = False,
     kv_quant_mode: str = "NONE",
-    kv_cache_type: str = "fp8",
+    kv_cache_dtype: str = "fp8",
     **kwargs: Any,
 ) -> None:
     """Quantizes the provided ONNX model.
@@ -360,6 +360,10 @@ def quantize(
         direct_io_types:
             If True, modify the I/O types in the quantized ONNX model to be lower precision whenever possible.
             If False, keep the I/O types in the quantized ONNX model the same as in the given ONNX model.
+        kv_quant_mode:
+            KV cache quantization mode and dtype. kv_quant_mode can be one of ["NONE", "PER_TENSOR"].
+        kv_cache_dtype:
+            kv_cache_dtype can be one of ["int8", "fp8"].
         kwargs:
             Additional keyword arguments for int4 quantization, including:
             - awqlite_alpha_step (float): Alpha step for lite, range [0, 1].
@@ -525,14 +529,13 @@ def quantize(
     if onnx_model:
         if kv_quant_mode != "NONE":
             logger.info(
-                f"Quantization mode for KV cache: {kv_quant_mode}, kv_cache_type: {kv_cache_type}"
+                f"Quantization mode for KV cache: {kv_quant_mode}, kv_cache_dtype: {kv_cache_dtype}"
             )
             onnx_model = kv_cache_quantize(
                 onnx_model,
                 kv_quant_mode=kv_quant_mode,
-                kv_cache_type=kv_cache_type,
+                kv_cache_dtype=kv_cache_dtype,
                 intermediate_generated_files=intermediate_generated_files,
-                calibration_method=calibration_method,
             )
 
         # Fuse Q nodes for INT8/FP8 mode

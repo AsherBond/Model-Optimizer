@@ -265,7 +265,7 @@ def get_parser() -> argparse.ArgumentParser:
         ),
     )
     argparser.add_argument(
-        "--kv_cache_type",
+        "--kv_cache_dtype",
         type=str,
         choices=["fp8", "int8"],
         default="NONE",
@@ -315,7 +315,7 @@ def main():
         calibrate_per_node=args.calibrate_per_node,
         direct_io_types=args.direct_io_types,
         kv_quant_mode=args.kv_quant_mode,
-        kv_cache_type=args.kv_cache_type,
+        kv_cache_dtype=args.kv_cache_dtype,
     )
 
 
