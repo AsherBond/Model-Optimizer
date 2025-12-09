@@ -327,6 +327,13 @@ def get_model(
                 device_map=device_map,
                 **model_kwargs,
             )
+        elif hf_config.quantization_config.get("format", None) == "pack-quantized":
+            model = AutoModelForCausalLM.from_pretrained(
+                ckpt_path,
+                torch_dtype=torch.float16,
+                device_map="auto",
+                trust_remote_code=trust_remote_code,
+            )
         else:
             architecture = hf_config.architectures[0]
 
