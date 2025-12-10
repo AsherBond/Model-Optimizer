@@ -269,7 +269,7 @@ class _DynamicMLP(DynamicModule):
         # can be discarded.
         # This limitation might be fixed in OMNIML-180 (Flexible Importance Estimator)
         # where we separate the importance estimation from the dynamic module.
-        self._register_temp_attribute("_activations", None)
+        self._register_temp_attribute("_activations", [])
         self.hook_handle = self.linear_fc2.register_forward_hook(self._linear_fc2_forward_hook)
         ffn_hidden_size.register_importance(self._estimate_importance)
 
@@ -289,19 +289,18 @@ class _DynamicMLP(DynamicModule):
         if input.shape[-1] != self.get_hparam(self.hparam_name).max:
             return
 
-        input = input.to(torch.float32)  # use full precision to avoid overflow
-        activations = input.abs().mean(dim=0)  # [batch_size, ffn_hidden_size]
-        activations = activations.pow(2).sum(dim=0)  # [ffn_hidden_size]
-        if self._activations is None:
-            self._activations = activations
-        else:
-            self._activations += activations
+        self._activations.append(input.cpu())
 
     def _estimate_importance(self) -> TracedHp.Importance:
         """Return the activation magnitude-based importance of the ffn_hidden_size."""
-        assert self._activations is not None, "No activations collected for importance estimation."
+        assert self._activations, "No activations collected for importance estimation."
+        # use full precision to avoid overflow
+        # seq_len for different micro batches may be different so we compute mean before concatenating
+        activations = [act.to(torch.float32).abs().mean(dim=0) for act in self._activations]
+        activations = torch.concatenate(activations, dim=0)  # [num_samples, ffn_hidden_size]
+        activations = activations.pow(2).sum(dim=0)  # [ffn_hidden_size]
         # Convert squared sum to L2 norm
-        return self._activations.pow(0.5)
+        return activations.pow(0.5)  # [ffn_hidden_size]
 
     def modify(self, ffn_hidden_size_divisor: int, **kwargs) -> None:
         """Modify the ffn_hidden_size hparam choices based on search space config."""
@@ -600,7 +599,7 @@ class _DynamicSelfAttention(DynamicModule):
         )
 
         # register importance estimator for linear_qkv.output_size and linear_proj.input_size
-        self._register_temp_attribute("_activations", None)
+        self._register_temp_attribute("_activations", [])
         self.hook_handle = self.linear_proj.register_forward_hook(self._linear_proj_forward_hook)
         # NOTE: num_heads_per_group's slice_order will be of length num_attention_heads to be able to sort heads,
         # otherwise we would only have aggregated importance of heads per group.
@@ -627,19 +626,19 @@ class _DynamicSelfAttention(DynamicModule):
         ):
             return
 
-        input = input.to(torch.float32)  # use full precision to avoid overflow
-        activations = input.abs().mean(dim=0)
-        activations = activations.pow(2).sum(dim=0)  # [query_projection_size]
-        if self._activations is None:
-            self._activations = activations
-        else:
-            self._activations += activations
+        self._activations.append(input.cpu())
 
     def _estimate_all_head_importance(self) -> TracedHp.Importance:
         """Return the importance for num_attention_heads (num_heads_per_group * num_query_groups)."""
-        assert self._activations is not None, "No activations collected for importance estimation."
+        assert self._activations, "No activations collected for importance estimation."
+        # use full precision to avoid overflow
+        # seq_len for different micro batches may be different so we compute mean before concatenating
+        activations = [act.to(torch.float32).abs().mean(dim=0) for act in self._activations]
+        activations = torch.concatenate(activations, dim=0)  # [num_samples, query_projection_size]
+        activations = activations.pow(2).sum(dim=0)  # [query_projection_size]
+
         # Convert squared sum to L2 norm
-        scores = self._activations.pow(0.5)
+        scores = activations.pow(0.5)
         attn_head_importance = torch.linalg.vector_norm(
             scores.view(
                 self.get_hparam("num_heads_per_group").max
@@ -653,9 +652,15 @@ class _DynamicSelfAttention(DynamicModule):
 
     def _estimate_query_group_importance(self) -> TracedHp.Importance:
         """Return the importance of the ``num_query_groups`` hparam."""
-        assert self._activations is not None, "No activations collected for importance estimation."
+        assert self._activations, "No activations collected for importance estimation."
+        # use full precision to avoid overflow
+        # seq_len for different micro batches may be different so we compute mean before concatenating
+        activations = [act.to(torch.float32).abs().mean(dim=0) for act in self._activations]
+        activations = torch.concatenate(activations, dim=0)  # [num_samples, query_projection_size]
+        activations = activations.pow(2).sum(dim=0)  # [query_projection_size]
+
         # Convert squared sum to L2 norm
-        scores = self._activations.pow(0.5)
+        scores = activations.pow(0.5)
         group_importance = torch.linalg.vector_norm(
             scores.view(
                 self.get_hparam("num_heads_per_group").max,
@@ -726,6 +731,7 @@ class _DynamicSequentialMLP(DynamicModule):
 
         # Track forward activations for importance estimation.
         # _activations name is needed for get_activations_and_layer_scores to save scores for re-running pruning.
+        # TODO: Collect raw activations on CPU and defer aggregation to _estimate_expert_importance
         self._register_temp_attribute(
             "_activations",
             {
@@ -1192,7 +1198,7 @@ class _DynamicMambaMixer(DynamicModule):
         self.cp = _MambaContextParallelProxy(self, self.cp)
 
         # Register importance estimator for mamba heads
-        self._register_temp_attribute("_activations", None)
+        self._register_temp_attribute("_activations", [])
         self.hook_handle = self.in_proj.register_forward_hook(self._mamba_in_proj_forward_hook)
         mamba_num_heads._importance_is_order = True
         mamba_num_heads.register_importance(self._estimate_head_importance)
@@ -1218,13 +1224,7 @@ class _DynamicMambaMixer(DynamicModule):
         if output.shape[-1] != self.in_proj.get_hparam("output_size").max:
             return
 
-        output = output.to(torch.float32)  # use full precision to avoid overflow
-        activations = output.abs().mean(dim=0)  # [batch_size, output_size]
-        activations = activations.pow(2).sum(dim=0)  # [output_size]
-        if self._activations is None:
-            self._activations = activations
-        else:
-            self._activations += activations
+        self._activations.append(output.cpu())
 
     def _estimate_head_and_head_dim_rankings(self):
         """Get the rankings of Mamba heads and head dimensions.
@@ -1233,9 +1233,15 @@ class _DynamicMambaMixer(DynamicModule):
             head_ranking: Ranking of Mamba heads of shape [mamba_num_heads.max]
             head_dim_ranking: Ranking of Mamba head dimensions of shape [mamba_head_dim.max]
         """
+        assert self._activations, "No activations collected for importance estimation."
+        # use full precision to avoid overflow
+        # seq_len for different micro batches may be different so we compute mean before concatenating
+        activations = [act.to(torch.float32).abs().mean(dim=0) for act in self._activations]
+        activations = torch.concatenate(activations, dim=0)  # [num_samples, output_size]
+        activations = activations.pow(2).sum(dim=0)  # [output_size]
+
         # Convert squared sum to L2 norm
-        scores = self._activations.pow(0.5)
-        assert scores is not None, "No activations collected for importance estimation."
+        scores = activations.pow(0.5)
 
         max_nheads: int = self.get_hparam("mamba_num_heads").max
         max_headdim: int = self.get_hparam("mamba_head_dim").max
@@ -1437,23 +1443,31 @@ class _DynamicMCoreLanguageModel(DynamicModule):
         if output.shape[-1] != self.get_hparam("hidden_size").max:
             return
 
-        output = output.to(torch.float32)  # use full precision to avoid overflow
-        activations = output.abs().mean(dim=0)  # [batch_size, hidden_size]
-        activations = activations.pow(2).sum(dim=0)  # [hidden_size]
         if id(module) not in self._activations:
-            self._activations[id(module)] = activations
+            self._activations[id(module)] = [output.cpu()]
         else:
-            self._activations[id(module)] += activations
+            self._activations[id(module)].append(output.cpu())
 
     def _estimate_hidden_size_importance(self) -> TracedHp.Importance:
         """Return the activation magnitude-based importance of the hidden_size."""
         assert self._activations, "No activations collected for importance estimation."
+        # use full precision to avoid overflow
+        # seq_len for different micro batches may be different so we compute mean before concatenating
+        activations = {
+            k: [act.to(torch.float32).abs().mean(dim=0) for act in v]
+            for k, v in self._activations.items()
+        }
+        activations = [
+            torch.concatenate(v, dim=0) for v in activations.values()
+        ]  # [num_samples, hidden_size]
+        activations = [act.pow(2).sum(dim=0) for act in activations]  # [hidden_size]
+
         # Convert squared sum to L2 norm over global batch size per hook
-        aggregated_activations = [act.pow(0.5) for act in self._activations.values()]
+        aggregated_activations = [act.pow(0.5) for act in activations]
         activations = torch.stack(aggregated_activations).sum(dim=0)  # [hidden_size]
 
         # Reduce over all PP ranks
-        activations = activations.clone()
+        activations = activations.clone().cuda()
         torch.distributed.all_reduce(activations, op=torch.distributed.ReduceOp.SUM)  # average
         return activations
 
