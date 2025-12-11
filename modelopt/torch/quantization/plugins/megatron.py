@@ -26,7 +26,6 @@ import megatron.core.transformer.mlp as megatron_mlp
 import megatron.core.transformer.moe.experts as megatron_moe
 import megatron.core.transformer.moe.moe_layer as megatron_moe_layer
 import torch
-from megatron.training import print_rank_0
 from megatron.core.parallel_state import get_data_parallel_group
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer import MegatronModule
@@ -657,7 +656,7 @@ if HAS_TE:
             ]
 
             for _, quantizer in quantizers:
-                if quantizer is not None and quantizer.is_enabled():
+                if quantizer is not None and quantizer.is_enabled:
                     if not hasattr(quantizer, "_amax") or quantizer._amax is None:
                         quantizer.reset_amax()
                         max_calibrate(quantizer, lambda q: q(dummy_tensor), distributed_sync=False)
@@ -683,9 +682,6 @@ if HAS_TE:
             for k, v in self.state_dict(prefix="", keep_vars=True).items():
                 if isinstance(v, torch.Tensor) and v is not None and "_quantizer" not in k:
                     sharded_state_dict[prefix + k] = v
-            print_rank_0(f"sharded_state_dict should have extra_state: {sharded_state_dict}")
-            #tmp_state = sharded_state_dict["decoder.layers.5.self_attention.core_attention._extra_state"]
-            #print_rank_0(f"unserialized extra_state: {pickle.loads(tmp_state.detach().cpu().numpy().tobytes())}")
 
             # Process _amax in bmm_quantizers
             for name, quantizer in [
@@ -756,7 +752,7 @@ if HAS_TE:
                 ("k_bmm_quantizer", self.k_bmm_quantizer),
                 ("v_bmm_quantizer", self.v_bmm_quantizer),
             ]:
-                if not hasattr(self, quantizer_name) or not quantizer.is_enabled():
+                if not hasattr(self, quantizer_name) or not quantizer.is_enabled:
                     continue
 
                 _check_unsupported_states(quantizer)
