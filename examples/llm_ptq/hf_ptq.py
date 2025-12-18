@@ -799,11 +799,12 @@ def parse_args() -> argparse.Namespace:
         "--qformat",
         help=(
             "Quantization format. Multiple possible choices: "
-            f"In plain quantization case: 1. it can be a format name, valid names are: {QUANT_CFG_CHOICES.keys()}. "
-            "2. it can be a built-in quantization configuration name, they are equivalent to file names without suffix "
-            "under modelopt/config/quantization/. "
+            f"A. In mono-quantize case, i.e. non-auto: "
+            f"1. it can be a format name, valid names are: {QUANT_CFG_CHOICES.keys()}. "
+            "2. it can be a built-in quantization configuration name, they are equivalent to "
+            "file names without suffix under modelopt/config/quantization/. "
             "3. It can be a path to a quantization configuration yaml file for custom quantization formats. "
-            "In auto-quantize case, i.e. --auto_quantize_bits is set: "
+            "B. In auto-quantize case, i.e. --auto_quantize_bits is set: "
             "it is a list of format names, separated by semicolon. "
         ),
         default="fp8",
