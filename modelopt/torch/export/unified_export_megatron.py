@@ -20,7 +20,6 @@
 
 import json
 import os
-import re
 import shutil
 import tempfile
 from collections import OrderedDict
@@ -51,6 +50,7 @@ from .plugins.mcore_common import all_mcore_hf_export_mapping
 from .plugins.mcore_custom import CustomModuleMapping, save_safetensors
 from .plugins.megatron_importer import GPTModelImporter
 from .quant_utils import (
+    _prefix_wildcard_summarize_exclude_modules,
     get_activation_scaling_factor,
     get_kv_cache_dtype,
     get_quantization_format,
@@ -607,45 +607,10 @@ class GPTModelExporter:
         # Find unquantized linear modules (have weight but no weight_scale)
         unquantized_modules = potentially_quantizable - quantized_modules
 
-        # Group by layer to create wildcard patterns
-        layer_pattern = re.compile(r"^(model\.layers\.\d+)\.")
-        unquantized_by_layer = {}  # layer_prefix -> set of unquantized submodules
-        other_unquantized = []
-
-        for module in unquantized_modules:
-            match = layer_pattern.match(module)
-            if match:
-                layer_prefix = match.group(1)
-                if layer_prefix not in unquantized_by_layer:
-                    unquantized_by_layer[layer_prefix] = set()
-                unquantized_by_layer[layer_prefix].add(module)
-            else:
-                # Non-layer modules like lm_head
-                other_unquantized.append(module)
-
-        # Build the exclude list
-        exclude_modules: list[str] = []
-
-        # Add non-layer unquantized modules (e.g., lm_head)
-        exclude_modules.extend(sorted(other_unquantized))
-
-        # For layers, check if entire layer is unquantized
-        for layer_prefix in sorted(unquantized_by_layer.keys()):
-            unquantized_in_layer = unquantized_by_layer[layer_prefix]
-
-            # Check if ANY linear module in this layer is quantized
-            has_quantized_in_layer = any(
-                m.startswith(layer_prefix + ".") for m in quantized_modules
-            )
-
-            if not has_quantized_in_layer:
-                # No quantized modules in this layer -> use wildcard
-                exclude_modules.append(f"{layer_prefix}.*")
-            else:
-                # Some modules quantized, some not -> list unquantized ones individually
-                exclude_modules.extend(sorted(unquantized_in_layer))
-
-        return exclude_modules
+        # Use the prefix wildcard summarization to create compact exclude patterns
+        return sorted(
+            _prefix_wildcard_summarize_exclude_modules(unquantized_modules, quantized_modules)
+        )
 
     def _get_weight_scales(self, quantized_state: dict[str, Any], qformat: str):
         weight_scale = quantized_state.pop("weight_scale", None)
