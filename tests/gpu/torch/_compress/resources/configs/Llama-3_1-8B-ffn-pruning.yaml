@@ -6,6 +6,8 @@ defaults:
   - override hydra/hydra_logging: disabled
   - _self_
 
+descriptor: llama
+
 puzzle_dir: ???
 teacher_dir: ${puzzle_dir}/ckpts/teacher/
 replacement_library_path: ${puzzle_dir}/replacement_library.json

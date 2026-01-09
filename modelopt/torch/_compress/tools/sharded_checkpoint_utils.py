@@ -17,22 +17,27 @@
 """
 Provides utilities for distributed loading, saving, and manipulation of
 large language model checkpoints across multiple GPUs/processes.
+
+Uses native HuggingFace models with deci_x_patcher for heterogeneous layer configurations.
 """
 
 import json
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Literal, cast
+from types import SimpleNamespace
+from typing import Literal, Type, cast
 
 import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+import transformers
 from huggingface_hub import split_torch_state_dict_into_shards
 from safetensors import safe_open
 from safetensors.torch import load_file as safe_load_file
 from safetensors.torch import save_file as safe_save_file
 from tqdm import tqdm
+from transformers import AutoConfig, AutoModelForCausalLM, PretrainedConfig
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 from transformers.utils.hub import cached_file, get_checkpoint_shard_files
 from typing_extensions import override
@@ -46,23 +51,18 @@ from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import (
 )
 from modelopt.torch._compress.tools.checkpoint_utils import load_model_config, load_state_dict
 from modelopt.torch._compress.tools.logger import mprint
+from modelopt.torch._compress.utils.dummy_modules import (
+    DummyBlock,
+    DummyLMHead,
+    DummyModule,
+    DummyWTE,
+)
 from modelopt.torch._compress.utils.utils import EmptyInitOnDevice
 
 
-class DummyModule(nn.Module):
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.register_load_state_dict_post_hook(self.load_state_dict_post_hook)
+class DeciLMDummyBlock(DummyModule):
+    """Dummy block for DeciLM models (used by replacement_library)."""
 
-    @staticmethod
-    def load_state_dict_post_hook(
-        module: torch.nn.Module, incompatible_keys: torch.nn.modules.module._IncompatibleKeys
-    ) -> None:
-        incompatible_keys.missing_keys.clear()
-        incompatible_keys.unexpected_keys.clear()
-
-
-class DummyBlock(DummyModule):
     def __init__(self, config: DeciLMConfig, block_index: int):
         super().__init__()
         self.config = config
@@ -76,7 +76,9 @@ class DummyBlock(DummyModule):
             return x, None
 
 
-class DummyWTE(DummyModule):
+class DeciLMDummyWTE(DummyModule):
+    """Dummy word token embedding for DeciLM models (used by replacement_library)."""
+
     def __init__(self, config: DeciLMConfig, dtype: torch.dtype | None = None):
         super().__init__()
         self.n_embd = config.get_hidden_size()
@@ -89,7 +91,9 @@ class DummyWTE(DummyModule):
         return result
 
 
-class DummyLMHead(DummyModule):
+class DeciLMDummyLMHead(DummyModule):
+    """Dummy LM head for DeciLM models (used by replacement_library)."""
+
     def __init__(self, config: DeciLMConfig):
         super().__init__()
         self.vocab_size = config.vocab_size
@@ -101,24 +105,44 @@ class DummyLMHead(DummyModule):
         return result
 
 
-def create_local_shard_(model: DeciLMForCausalLM, owned_block_indexes: set[int]):
-    all_block_indexes = set(range(len(model.model.layers)))
+def set_submodule(model: nn.Module, module_name: str, new_submodule: nn.Module) -> None:
+    """Set a submodule on a model by dotted path."""
+    parts = module_name.split(".")
+    parent_path = ".".join(parts[:-1])
+    attr = parts[-1]
+    parent_module = model.get_submodule(parent_path) if parent_path else model
+    setattr(parent_module, attr, new_submodule)
+
+
+def create_local_shard_(model, owned_block_indexes: set[int], descriptor, runtime):
+    all_block_indexes = set(range(model.config.num_hidden_layers))
     has_first_block = 0 in owned_block_indexes
     has_last_block = max(all_block_indexes) in owned_block_indexes
 
     unowned_block_indexes = all_block_indexes - owned_block_indexes
     for block_index in unowned_block_indexes:
-        model.model.layers[block_index] = cast(
-            "DeciLMDecoderLayer", DummyBlock(model.config, block_index)
+        decoder_layer_name = descriptor.layer_block_name(block_index)
+        decoder_layer = model.get_submodule(decoder_layer_name)
+        set_submodule(
+            model,
+            decoder_layer_name,
+            descriptor.create_dummy_block(decoder_layer, block_index=block_index),
         )
 
-    if not has_first_block:
-        model.set_input_embeddings(DummyWTE(model.config))
+    # If we have the last block with tied embeddings, keep embed_tokens so lm_head works.
+    # load_sharded_state_dict will load embed_tokens.weight from the first shard's checkpoint file,
+    # and since they're tied, lm_head.weight gets populated too.
+    if not has_first_block and not (has_last_block and model.config.tie_word_embeddings):
+        set_submodule(
+            model,
+            descriptor.input_embedding_name(),
+            DummyWTE(model.config.hidden_size, dtype=runtime.dtype),
+        )
 
     if not has_last_block:
-        model.model.set_final_layer_norm(nn.Identity())
+        set_submodule(model, descriptor.final_norm_name(), nn.Identity())
         if not (model.config.tie_word_embeddings and has_first_block):
-            model.set_output_embeddings(DummyLMHead(model.config))
+            set_submodule(model, descriptor.output_embedding_name(), DummyLMHead(model.config))
 
     return model
 
@@ -133,42 +157,73 @@ def create_dummy_model(
     rope_cls = rope_type_to_class[model_config.position_embedding_type]
     model.model.rotary_emb = rope_cls(config=model.config)
 
-    model.model.set_input_embeddings(DummyWTE(model.config, dtype))
+    model.model.set_input_embeddings(DeciLMDummyWTE(model.config, dtype))
     model.model.set_final_layer_norm(nn.Identity())
-    model.set_output_embeddings(DummyLMHead(model.config))
+    model.set_output_embeddings(DeciLMDummyLMHead(model.config))
 
     for block_index in range(model_config.get_num_hidden_layers()):
-        model.model.layers[block_index] = DummyBlock(model.config, block_index)
+        model.model.layers[block_index] = DeciLMDummyBlock(model.config, block_index)
 
     return model
 
 
+def _get_model_class_from_config(config: PretrainedConfig):
+    """
+    Get the model class from config.architectures field.
+    Works for any model registered in transformers (CausalLM, VL models, etc.).
+    Falls back to AutoModelForCausalLM if architectures is not available.
+    """
+    if hasattr(config, "architectures") and config.architectures:
+        model_class_name = config.architectures[0]
+        if hasattr(transformers, model_class_name):
+            return getattr(transformers, model_class_name)
+        mprint(
+            f"Warning: {model_class_name} not found in transformers, falling back to AutoModelForCausalLM"
+        )
+    return AutoModelForCausalLM
+
+
 def load_and_shard_model(
+    descriptor,
     checkpoint_path: str | Path,
     owned_block_indexes: set[int] | Literal["auto"] = "auto",
-    model_config: DeciLMConfig | None = None,
-    model_config_overrides: Mapping | None = None,
-    model_dtype: torch.dtype = torch.bfloat16,
-) -> DeciLMForCausalLM:
+    model_config: PretrainedConfig | None = None,
+):
     checkpoint_path = Path(checkpoint_path)
-    with torch.device(dist.local_rank()):
+    runtime = SimpleNamespace(
+        device=torch.device(dist.local_rank()),
+        dtype=torch.bfloat16,
+        global_rank=dist.rank(),
+        world_size=dist.size(),
+        is_main_process=dist.is_master(),
+        is_last_process=dist.is_last_process(),
+    )
+
+    with runtime.device:
         if model_config is None:
-            model_config = load_model_config(
-                checkpoint_path, model_config_overrides, ignore_unexpected_config_keys=True
-            )
+            model_config = load_model_config(checkpoint_path)
 
         if owned_block_indexes == "auto":
             owned_block_indexes = set(
-                np.array_split(np.arange(model_config.get_num_hidden_layers()), dist.size())[
-                    dist.rank()
+                np.array_split(np.arange(model_config.num_hidden_layers), runtime.world_size)[
+                    runtime.global_rank
                 ]
             )
 
         mprint("Initializing model shards")
-        model_shard = create_sharded_model(
-            model_config=model_config,
-            owned_block_indexes=owned_block_indexes,
-        )
+        # Pass block_configs explicitly so patcher works for VL models where
+        # decoder layers receive nested config (e.g., text_config) without block_configs
+        from modelopt.torch._compress.anymodel.puzzformer import deci_x_patcher
+
+        with deci_x_patcher(
+            model_descriptor=descriptor, block_configs=getattr(model_config, "block_configs", None)
+        ):
+            model_shard = create_sharded_model(
+                runtime=runtime,
+                descriptor=descriptor,
+                model_config=model_config,
+                owned_block_indexes=owned_block_indexes,
+            )
 
         if (checkpoint_path / SAFE_WEIGHTS_NAME).exists() or (
             checkpoint_path / SAFE_WEIGHTS_INDEX_NAME
@@ -181,27 +236,43 @@ def load_and_shard_model(
             shard_state_dict = load_sharded_state_dict(
                 model_name_or_path=str(checkpoint_path),
                 keys_to_load=shard_keys,
-                device=torch.device(dist.local_rank()),
+                device=runtime.device,
             )
 
             new_names = set(shard_state_dict.keys())
             mprint(f"{new_names=}")
-            model_shard.load_state_dict(shard_state_dict, assign=True)
+            # strict=False: allows missing lm_head.weight when tie_word_embeddings=True (e.g., Llama 3.2 3B)
+            model_shard.load_state_dict(shard_state_dict, strict=False, assign=True)
 
             del shard_state_dict
 
-            if model_config.tie_word_embeddings and (0 in owned_block_indexes):
-                # re-tie the weights in case the connection was severed
+            # Re-tie weights after load_state_dict with assign=True, which severs the tie.
+            # Needed on first rank (owns embed_tokens) and last rank (owns lm_head).
+            has_first_block = 0 in owned_block_indexes
+            has_last_block = (model_config.num_hidden_layers - 1) in owned_block_indexes
+            if model_config.tie_word_embeddings and (has_first_block or has_last_block):
                 model_shard.tie_weights()
+
+            # On the last rank with tied embeddings, we kept embed_tokens in create_local_shard_()
+            # just to load the weight and tie it to lm_head. Now replace it with a dummy so it
+            # doesn't interfere with the pipeline forward pass (only rank 0 should run embed_tokens).
+            if model_config.tie_word_embeddings and has_last_block and not has_first_block:
+                set_submodule(
+                    model_shard,
+                    descriptor.input_embedding_name(),
+                    DummyWTE(model_config.hidden_size, dtype=runtime.dtype),
+                )
         else:
             mprint("Loading state_dict in main process")
-            state_dict = load_state_dict(checkpoint_path) if dist.is_master() else None
+            state_dict = load_state_dict(checkpoint_path) if runtime.is_main_process else None
 
             mprint("Distributing model to shards")
             load_state_dict_to_shards(model_shard=model_shard, loaded_state_dict=state_dict)
             del state_dict
 
-        model_shard.type(model_dtype)
+        descriptor.init_rotary_embedding(model_shard, runtime)
+
+        model_shard.type(runtime.dtype)
 
     params_on_meta_device = [
         param_name
@@ -209,14 +280,16 @@ def load_and_shard_model(
         if param.device == torch.device("meta")
     ]
     assert len(params_on_meta_device) == 0, (
-        f"[global_rank={dist.rank()}]  Couldn't load params {params_on_meta_device}"
+        f"[global_rank={runtime.global_rank}]  Couldn't load params {params_on_meta_device}"
     )
 
     return model_shard
 
 
 def create_sharded_model(
-    model_config: DeciLMConfig,
+    runtime,
+    descriptor,
+    model_config: PretrainedConfig,
     owned_block_indexes: set[int],
     device: str | torch.device | None = "meta",
     dtype: torch.dtype | None = torch.float32,
@@ -227,14 +300,24 @@ def create_sharded_model(
     dist.barrier()
 
     with EmptyInitOnDevice(device="meta", dtype=dtype):
-        model = DeciLMForCausalLM(model_config)
-        create_local_shard_(model=model, owned_block_indexes=owned_block_indexes)
+        # Get model class from config.architectures (works for CausalLM, VL models, etc.)
+        model_class = _get_model_class_from_config(model_config)
+        # AutoModelForCausalLM uses from_config(); concrete model classes use _from_config()
+        if model_class is AutoModelForCausalLM:
+            model = model_class.from_config(model_config, trust_remote_code=True)
+        else:
+            model = model_class._from_config(model_config)
+        create_local_shard_(
+            model=model,
+            owned_block_indexes=owned_block_indexes,
+            descriptor=descriptor,
+            runtime=runtime,
+        )
 
     if device != torch.device("meta"):
         local_shard_state_dict = {
             k: torch.empty_like(v, device=device) for k, v in model.state_dict().items()
         }
-
         model.load_state_dict(local_shard_state_dict, assign=True)
 
     return model

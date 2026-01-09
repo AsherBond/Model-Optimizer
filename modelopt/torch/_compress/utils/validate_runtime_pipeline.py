@@ -23,16 +23,16 @@ Used by validate_model.py during activation scoring for sharded models.
 """
 # mypy: ignore-errors
 
+from typing import Type
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import (
-    DeciLMForCausalLM,
-    LMHead,
-)
+from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptor
+from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import LMHead
 from modelopt.torch._compress.sewing_kit import (
     ExternalTarget,
     InputArgs,
@@ -60,7 +60,7 @@ class HiddenStatesAndLMHead(list):
 
 @torch.no_grad()
 def calculate_losses_pipeline(
-    stitched_model: StitchedModule | DeciLMForCausalLM,
+    stitched_model: StitchedModule,
     dataloader: DataLoader | None,
     target_hidden_states_per_batch: HiddenStatesAndLMHead | None = None,
     return_hidden_states: bool = False,
@@ -69,6 +69,7 @@ def calculate_losses_pipeline(
     just_model_forward: bool = False,
     checkpoint_manager=None,
     autocast_dtype: torch.dtype = torch.bfloat16,
+    descriptor: Type[ModelDescriptor] = None,
 ) -> tuple[dict[str, dict], HiddenStatesAndLMHead | None] | tuple[None, None]:
     """
     Do model forward on each batch and calculate LM loss.
@@ -89,8 +90,8 @@ def calculate_losses_pipeline(
         target_hidden_states_per_batch: list[torch.Tensor], returned if return_hidden_states=True
 
     """
-    if isinstance(stitched_model, DeciLMForCausalLM):
-        stitched_model = perform_pipeline_stitches(stitched_model)
+    if not isinstance(stitched_model, StitchedModule):
+        stitched_model = perform_pipeline_stitches(stitched_model, descriptor)
 
     params = list(stitched_model.parameters())
     model_device = params[0].device if params else "cpu"
@@ -202,13 +203,28 @@ def calculate_losses_pipeline(
     return losses, hidden_states_per_batch
 
 
-def perform_pipeline_stitches(model: DeciLMForCausalLM) -> StitchedModule:
+def perform_pipeline_stitches(
+    model,
+    descriptor: Type[ModelDescriptor],
+) -> StitchedModule:
+    """Create pipeline stitches for distributed model evaluation.
+
+    Args:
+        model: The model to stitch (any HuggingFace model with AnyModel descriptor).
+        descriptor: ModelDescriptor for layer naming.
+    """
     target = ModuleTarget("module", model)
     stitcher = Needle()
 
+    num_layers = model.config.num_hidden_layers
+
     is_real_block = np.flatnonzero(
-        [not isinstance(block, DummyBlock) for block in model.model.layers]
+        [
+            not isinstance(model.get_submodule(descriptor.layer_block_name(i)), DummyBlock)
+            for i in range(num_layers)
+        ]
     )
+
     first_block, last_block = is_real_block.min(), is_real_block.max()
 
     if dist.rank() != 0:
@@ -218,7 +234,7 @@ def perform_pipeline_stitches(model: DeciLMForCausalLM) -> StitchedModule:
                 name="activations", adapter=lambda x: InputArgs(x)
             ),
             target.input(
-                name=f"model.layers.{first_block}",
+                name=descriptor.layer_block_name(first_block),
                 reducer=InputReducer(
                     lambda acc, override, orig, *args: override + orig.drop_args(0)
                 ),
@@ -228,17 +244,17 @@ def perform_pipeline_stitches(model: DeciLMForCausalLM) -> StitchedModule:
     if not dist.is_last_process():
         # send activations to next rank
         stitcher.stitch(
-            target.output(f"model.layers.{last_block}"),
+            target.output(descriptor.layer_block_name(last_block)),
             RemoteTarget(peer_rank=dist.rank() + 1).value(name="activations"),
         )
     else:
         # register model output
         stitcher.stitch(
-            target.output(name="lm_head"),
+            target.output(name=descriptor.output_embedding_name()),
             ExternalTarget().output("model_output"),
         )
         stitcher.stitch(
-            target.output(name="model.norm"),
+            target.output(name=descriptor.final_norm_name()),
             ExternalTarget().output("hidden_states"),
         )
 

@@ -141,4 +141,4 @@ def launch_score_activations(cfg: DictConfig):
     mprint("Starting pruning activation scoring...")
 
     # The checkpoint manager inside validate_model handles all progress tracking
-    validate_model(args=cfg.pruning, pipeline_parallel=True)
+    validate_model(args=cfg.pruning)

@@ -32,9 +32,12 @@ from typing import Any, BinaryIO
 
 import torch
 from safetensors.torch import save_file as safe_save_file
+from transformers import AutoConfig, PretrainedConfig
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from modelopt.torch._compress.decilm import deci_lm_hf_code
+from modelopt.torch._compress.decilm.deci_lm_hf_code.block_config import maybe_cast_block_configs
 from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import DeciLMForCausalLM
 from modelopt.torch._compress.tools.common import infer_weights_dtype
@@ -101,20 +104,35 @@ def load_checkpoint(
     return model
 
 
+def force_cache_dynamic_modules(config: PretrainedConfig, checkpoint_dir: Path | str):
+    has_remote_code = (
+        hasattr(config, "auto_map")
+        and isinstance(config.auto_map, dict)
+        and "AutoConfig" in config.auto_map.keys()
+    )
+    if has_remote_code:
+        for class_reference in config.auto_map.values():
+            _ = get_class_from_dynamic_module(class_reference, checkpoint_dir)
+
+
 def load_model_config(
     checkpoint_dir: Path | str,
     model_config_overrides: Mapping | None = None,
     ignore_unexpected_config_keys: bool = False,
-) -> DeciLMConfig:
+):
     if not isinstance(checkpoint_dir, Path):
         checkpoint_dir = Path(checkpoint_dir)
 
     if model_config_overrides is None:
         model_config_overrides = {}
 
-    config, unused_kwargs = DeciLMConfig.from_pretrained(
-        checkpoint_dir, return_unused_kwargs=True, **model_config_overrides
+    config, unused_kwargs = AutoConfig.from_pretrained(
+        checkpoint_dir, trust_remote_code=True, return_unused_kwargs=True, **model_config_overrides
     )
+    if hasattr(config, "block_configs"):
+        config.block_configs = maybe_cast_block_configs(config.block_configs)
+
+    force_cache_dynamic_modules(config, checkpoint_dir)
 
     if not ignore_unexpected_config_keys:
         if unused_kwargs:

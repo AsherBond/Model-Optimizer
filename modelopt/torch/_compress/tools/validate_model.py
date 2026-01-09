@@ -12,43 +12,47 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+# mypy: ignore-errors
 """
 Provides a function to validate a model. Runs a model forward pass on a dataset and calculates
 the loss, and optionally registers hooks to capture the inputs and the outputs
 of pytorch modules that are used for activation scoring for pruning.
 
 TODO: Consider moving this a separate module dedicated for scoring
+
+Uses native HuggingFace models with deci_x_patcher for heterogeneous layer configurations.
 """
 
 import textwrap
 from pathlib import Path
+from typing import Type
 
 import torch
 from omegaconf import DictConfig
 from torch import nn
 from torch.utils.data import DataLoader
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    PreTrainedModel,
-    PreTrainedTokenizerBase,
-)
+from transformers import AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.activation_scoring.activation_hooks.utils import (
     register_activation_hooks,
 )
-from modelopt.torch._compress.tools.checkpoint_utils_hf import load_checkpoint
+from modelopt.torch._compress.anymodel.model_descriptor import (
+    ModelDescriptor,
+    ModelDescriptorFactory,
+)
+from modelopt.torch._compress.anymodel.puzzformer.no_op import Same
 from modelopt.torch._compress.tools.logger import aprint, mprint
-from modelopt.torch._compress.tools.sharded_checkpoint_utils import load_and_shard_model
+from modelopt.torch._compress.tools.sharded_checkpoint_utils import (
+    load_and_shard_model,
+    set_submodule,
+)
 from modelopt.torch._compress.utils.data.dataloaders import create_validation_dataloader
 from modelopt.torch._compress.utils.parsing import simple_parse_args_string
 from modelopt.torch._compress.utils.validate_runtime_pipeline import (
     HiddenStatesAndLMHead,
     calculate_losses_pipeline,
 )
-from modelopt.torch._compress.utils.validation import calculate_losses
 
 """
 Two goals:
@@ -71,7 +75,6 @@ def validate_model(
     tokenizer: PreTrainedTokenizerBase | None = None,
     target_hidden_states_per_batch: list[torch.Tensor] | None = None,
     return_hidden_states: bool = False,
-    pipeline_parallel: bool = False,
     calculate_full_score_ablations: bool = False,
     val_dataloader: DataLoader | None = None,
 ) -> tuple[dict[str, dict], HiddenStatesAndLMHead | None] | tuple[None, None]:
@@ -119,7 +122,6 @@ def validate_model(
         tokenizer: Pre-loaded tokenizer. If None, will be loaded based on args.
         target_hidden_states_per_batch: Target hidden states for pipeline parallel evaluation.
         return_hidden_states: Whether to return hidden states from the model.
-        pipeline_parallel: Enable pipeline parallelism for large models.
         calculate_full_score_ablations: Calculate comprehensive teacher similarity scores.
                                          False calculates only a small suite for efficiency.
         val_dataloader: Pre-created validation dataloader. If None, will be created from args.
@@ -130,6 +132,7 @@ def validate_model(
         - hidden_states_per_batch: Hidden states and LM head outputs if return_hidden_states is True, else None.
         Returns (None, None) if not on master rank.
     """
+    descriptor = ModelDescriptorFactory.get(args.descriptor)
 
     if val_dataloader is None:
         val_dataloader = prepare_dataloader(args, tokenizer) if dist.is_master() else None
@@ -137,7 +140,7 @@ def validate_model(
         args.eval_samples // args.micro_batch_size
     )  # model pipeline, single data rank
 
-    model = prepare_model(args, model, pipeline_parallel)
+    model = prepare_model(args, descriptor=descriptor, model=model)
 
     just_model_forward = False
     checkpoint_manager = None
@@ -176,26 +179,20 @@ def validate_model(
         else:
             mprint("No checkpoint found, starting fresh")
         just_model_forward = True
-        model.lm_head = nn.Identity()
+        set_submodule(model, descriptor.output_embedding_name(), Same())
 
-    if not pipeline_parallel:
-        losses, hidden_states_per_batch = calculate_losses(
-            model=model,
-            dataloader=val_dataloader,
-            checkpoint_manager=checkpoint_manager,
-        )
-    else:
-        losses, hidden_states_per_batch = calculate_losses_pipeline(
-            stitched_model=model,
-            dataloader=val_dataloader,
-            target_hidden_states_per_batch=target_hidden_states_per_batch,
-            return_hidden_states=return_hidden_states,
-            calculate_full_score_ablations=calculate_full_score_ablations,
-            calc_on_cpu=args.calc_losses_on_cpu,
-            just_model_forward=just_model_forward,
-            checkpoint_manager=checkpoint_manager,
-            autocast_dtype=getattr(torch, args.autocast_dtype.strip("torch.")),
-        )
+    losses, hidden_states_per_batch = calculate_losses_pipeline(
+        stitched_model=model,
+        dataloader=val_dataloader,
+        target_hidden_states_per_batch=target_hidden_states_per_batch,
+        return_hidden_states=return_hidden_states,
+        calculate_full_score_ablations=calculate_full_score_ablations,
+        calc_on_cpu=args.calc_losses_on_cpu,
+        just_model_forward=just_model_forward,
+        checkpoint_manager=checkpoint_manager,
+        autocast_dtype=getattr(torch, args.autocast_dtype.strip("torch.")),
+        descriptor=descriptor,
+    )
 
     if losses is not None:
         avg_losses = {loss_name: loss_log["avg"] for loss_name, loss_log in losses.items()}
@@ -219,31 +216,13 @@ def validate_model(
 
 
 def prepare_model(
-    args: DictConfig, model: PreTrainedModel | None = None, pipeline_parallel: bool = False
+    args: DictConfig,
+    descriptor: Type[ModelDescriptor],
+    model: PreTrainedModel | None = None,
 ) -> nn.Module:
     if model is None:
         assert args.model_name_or_path is not None
-        if pipeline_parallel:
-            model = load_and_shard_model(
-                args.model_name_or_path,
-                model_config_overrides={"block_size": args.block_size},
-                model_dtype=getattr(torch, args.model_dtype.strip("torch.")),
-            )
-        else:
-            try:
-                model = load_checkpoint(
-                    args.model_name_or_path,
-                    model_config_overrides={"block_size": args.block_size},
-                    ignore_unexpected_config_keys=True,
-                )
-                model.to("cuda")
-            except FileNotFoundError:
-                model = AutoModelForCausalLM.from_pretrained(
-                    args.model_name_or_path,
-                    torch_dtype="auto",
-                    device_map="auto",
-                    trust_remote_code=True,
-                )
+        model = load_and_shard_model(descriptor=descriptor, checkpoint_path=args.model_name_or_path)
 
     model.eval()
     return model
