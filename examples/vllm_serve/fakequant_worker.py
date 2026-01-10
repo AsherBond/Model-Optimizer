@@ -259,9 +259,9 @@ def _fakequant_run_prolog_worker(self) -> None:
                 if output is None:  # TODO: make this default when vllm <= 0.11 is outdated
                     self.sample_tokens(None)
 
-    quant_cfg = {} if quant_config["quant_cfg"] is None else getattr(mtq, quant_config["quant_cfg"])
+    quant_cfg = getattr(mtq, quant_config["quant_cfg"]) if quant_config["quant_cfg"] else {}
     quant_kv_cfg = (
-        {} if quant_config["kv_quant_cfg"] is None else getattr(mtq, quant_config["kv_quant_cfg"])
+        getattr(mtq, quant_config["kv_quant_cfg"]) if quant_config["kv_quant_cfg"] else {}
     )
 
     model = self.model_runner.model
