@@ -64,8 +64,10 @@ def launch_ffn_intermediates_prune_ckpt(
         mprint("Starting init_child_from_parent...")
         start_time = time.time()
         init_child_from_parent(
+            descriptor=cfg.descriptor,
+            pruning_mixin=cfg.pruning.pruning_mixin,
             parent_checkpoint_dir=cfg.teacher_dir,
-            model_config_overrides_json=model_config_overrides_json,
+            model_config_overrides_dict=model_config_overrides_json,
             output_checkpoint_dir=output_dir,
             gqa_init_mode=GQAInitMode(cfg.pruning.gqa_init_mode),
             mlp_init_mode=MlpInitMode(cfg.pruning.mlp_init_mode),
@@ -108,8 +110,10 @@ def launch_attn_groups_prune_ckpt(
         mprint("Starting init_child_from_parent...")
         start_time = time.time()
         init_child_from_parent(
+            descriptor=cfg.descriptor,
+            pruning_mixin=cfg.pruning.pruning_mixin,
             parent_checkpoint_dir=cfg.teacher_dir,
-            model_config_overrides_json=model_config_overrides_json,
+            model_config_overrides_dict=model_config_overrides_json,
             output_checkpoint_dir=output_dir,
             gqa_init_mode=GQAInitMode(cfg.pruning.gqa_init_mode),
             mlp_init_mode=MlpInitMode(cfg.pruning.mlp_init_mode),
@@ -188,8 +192,10 @@ def launch_hidden_dim_prune_ckpt(cfg: DictConfig):
         mprint(f"Model config overrides: {model_config_overrides_json}")
 
         init_child_from_parent(
+            descriptor=cfg.descriptor,
+            pruning_mixin=cfg.pruning.pruning_mixin,
             parent_checkpoint_dir=cfg.pruning.model_name_or_path,
-            model_config_overrides_json=model_config_overrides_json,
+            model_config_overrides_dict=model_config_overrides_json,
             output_checkpoint_dir=output_dir,
             gqa_init_mode=GQAInitMode(cfg.pruning.gqa_init_mode),
             mlp_init_mode=MlpInitMode(cfg.pruning.mlp_init_mode),
@@ -233,8 +239,10 @@ def launch_experts_prune_ckpt(
         mprint("Starting init_child_from_parent...")
         start_time = time.time()
         init_child_from_parent(
+            descriptor=cfg.descriptor,
+            pruning_mixin=cfg.pruning.pruning_mixin,
             parent_checkpoint_dir=cfg.teacher_dir,
-            model_config_overrides_json=model_config_overrides_json,
+            model_config_overrides_dict=model_config_overrides_json,
             output_checkpoint_dir=output_dir,
             gqa_init_mode=GQAInitMode(cfg.pruning.gqa_init_mode),
             mlp_init_mode=MlpInitMode(cfg.pruning.mlp_init_mode),
@@ -279,8 +287,10 @@ def launch_moe_ffn_intermediates_prune_ckpt(
         mprint("Starting init_child_from_parent...")
         start_time = time.time()
         init_child_from_parent(
+            descriptor=cfg.descriptor,
+            pruning_mixin=cfg.pruning.pruning_mixin,
             parent_checkpoint_dir=cfg.teacher_dir,
-            model_config_overrides_json=model_config_overrides_json,
+            model_config_overrides_dict=model_config_overrides_json,
             output_checkpoint_dir=output_dir,
             gqa_init_mode=GQAInitMode(cfg.pruning.gqa_init_mode),
             mlp_init_mode=MlpInitMode(cfg.pruning.mlp_init_mode),

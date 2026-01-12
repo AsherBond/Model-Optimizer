@@ -33,6 +33,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptorFactory
 from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch._compress.replacement_library.replacement_library import ReplacementLibrary
 from modelopt.torch._compress.replacement_library.replacement_utils import parse_layer_replacement
@@ -119,6 +120,8 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
     Returns:
         None. Saves validation results and optionally model checkpoints to disk.
     """
+    descriptor = ModelDescriptorFactory.get(args.descriptor)
+
     puzzle_solutions = load_puzzle_solutions(
         args.solutions_path, args.sort_solutions_by, args.bigger_is_better
     )
@@ -138,13 +141,13 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
         else args.solutions_path.with_name(f"{args.solutions_path.stem}--validation")
     )
 
-    replacement_library = ReplacementLibrary(args.replacement_library_path)
+    replacement_library = ReplacementLibrary(args.replacement_library_path, descriptor=descriptor)
 
     teacher_hidden_states = None
     if (args.teacher_dir is not None) and (not args.skip_validation):
         teacher_model = replacement_library.load_checkpoint(args.teacher_dir)
         teacher_model.cuda(dist.local_rank())
-        stitched_model = perform_pipeline_stitches(teacher_model)
+        stitched_model = perform_pipeline_stitches(teacher_model, descriptor=descriptor)
         teacher_hidden_states = validate_model_and_extract_hidden_states(
             args,
             stitched_model,
@@ -180,7 +183,7 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
                         layer_replacements, model_config, checkpoint_dir, replacement_library
                     )
             else:
-                save_checkpoint(model, checkpoint_dir)
+                save_checkpoint(model, checkpoint_dir, descriptor)
 
             copy_tokenizer(args.tokenizer_name, checkpoint_dir)
             copy_deci_lm_hf_code(checkpoint_dir)
@@ -189,7 +192,7 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
 
         if not args.skip_validation:
             model.cuda(dist.local_rank())
-            stitched_model = perform_pipeline_stitches(model)
+            stitched_model = perform_pipeline_stitches(model, descriptor=descriptor)
             validate_model_with_teacher_similarity_metrics(
                 args,
                 stitched_model,

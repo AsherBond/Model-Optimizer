@@ -14,7 +14,7 @@
 # limitations under the License.
 # mypy: ignore-errors
 
-"""TODO Add description. Analyze this code, why is it so long and complex? Can it be simplified?"""
+"""Core logic for creating pruned child model state dicts from parent models. Used by init_child_from_parent."""
 
 import concurrent.futures
 import dataclasses
@@ -371,10 +371,12 @@ def create_child_state_dict(
             else:
                 out_state_dict[key] = tensor
 
-    original_n_heads_in_group_per_layer = [
-        b.attention.n_heads_in_group for b in original_config.block_configs
+    # Check if original model is MHA (all layers have num_key_value_heads == num_attention_heads)
+    original_num_kv_heads_per_layer = [
+        b.attention.num_key_value_heads for b in original_config.block_configs
     ]
-    is_original_mha = set(original_n_heads_in_group_per_layer) == {1}
+    num_attention_heads = original_config.num_attention_heads
+    is_original_mha = all(kv == num_attention_heads for kv in original_num_kv_heads_per_layer)
     is_same_hidden_size = original_config.hidden_size == new_config.hidden_size
     head_size = new_config.head_dim
     orig_head_size = original_config.head_dim
@@ -911,10 +913,11 @@ def _init_attention_weights(
         f"({new_config.num_attention_heads=}) != ({original_config.num_attention_heads=})"
     )
     num_q_heads = new_config.num_attention_heads
-    n_heads_in_group = new_config.block_configs[layer_idx].attention.n_heads_in_group
-    orig_n_heads_in_group = original_config.block_configs[layer_idx].attention.n_heads_in_group
-    num_kv_heads = num_q_heads // n_heads_in_group
-    orig_num_kv_heads = num_q_heads // orig_n_heads_in_group
+    # Get num_kv_heads from config, compute n_heads_in_group
+    num_kv_heads = new_config.block_configs[layer_idx].attention.num_key_value_heads
+    orig_num_kv_heads = original_config.block_configs[layer_idx].attention.num_key_value_heads
+    n_heads_in_group = num_q_heads // num_kv_heads
+    orig_n_heads_in_group = num_q_heads // orig_num_kv_heads
 
     # new_w* are typically randomly initialized
     new_wq = new_state_dict[q_key]
@@ -1059,10 +1062,11 @@ def _init_attention_biases(
         f"({new_config.num_attention_heads=}) != ({original_config.num_attention_heads=})"
     )
     num_q_heads = new_config.num_attention_heads
-    n_heads_in_group = new_config.block_configs[layer_idx].attention.n_heads_in_group
-    orig_n_heads_in_group = original_config.block_configs[layer_idx].attention.n_heads_in_group
-    num_kv_heads = num_q_heads // n_heads_in_group
-    orig_num_kv_heads = num_q_heads // orig_n_heads_in_group
+    # Get num_kv_heads from config, compute n_heads_in_group
+    num_kv_heads = new_config.block_configs[layer_idx].attention.num_key_value_heads
+    orig_num_kv_heads = original_config.block_configs[layer_idx].attention.num_key_value_heads
+    n_heads_in_group = num_q_heads // num_kv_heads
+    orig_n_heads_in_group = num_q_heads // orig_num_kv_heads
 
     o_proj_bias = new_config.o_proj_bias
     attention_bias = new_config.attention_bias
@@ -1233,8 +1237,9 @@ def _init_linear_attn(
     """
     n_embd = parent_config.hidden_size
     head_size = parent_config.head_dim
-    n_heads_in_group = parent_config.block_configs[layer_idx].attention.n_heads_in_group
-    n_kv_heads = parent_config.num_attention_heads // n_heads_in_group
+    # Get num_kv_heads from config, compute n_heads_in_group
+    n_kv_heads = parent_config.block_configs[layer_idx].attention.num_key_value_heads
+    n_heads_in_group = parent_config.num_attention_heads // n_kv_heads
 
     wv = parent_state_dict[v_key]
     wv = wv.view(n_kv_heads, head_size, n_embd)
@@ -1319,9 +1324,9 @@ def _parse_model_config_overrides(
     n_layer: int,
 ) -> list[dict[str, Any]]:
     """
-    example model_config_overrides_json:
+    example model_config_overrides_dict:
     {
-        "attention": [{"n_heads_in_group": 2}],
+        "attention": [{"num_key_value_heads": 4}],
         "ffn": [{"intermediate_size": 14336}]
     }
     """
