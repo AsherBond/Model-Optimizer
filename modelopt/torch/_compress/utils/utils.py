@@ -28,23 +28,21 @@ from modelopt.torch._compress.decilm.deci_lm_hf_code.block_config import (
 )
 
 
-def calculate_kv_dim(n_heads_in_group: int, n_head: int, n_embd: int) -> int:
+def calculate_kv_dim(num_key_value_heads: int, n_head: int, n_embd: int) -> int:
     """Calculate the key-value dimension for grouped-query attention.
 
-    TODO: Consider a better place for this function.
     Args:
-        n_heads_in_group: Number of attention heads per key-value group.
+        num_key_value_heads: Number of key-value heads.
         n_head: Total number of attention heads.
         n_embd: Embedding dimension.
 
     Returns:
-        Combined dimension for key and value tensors (2 * n_kv_heads * head_size).
+        Combined dimension for key and value tensors (2 * num_key_value_heads * head_size).
     """
-    if n_heads_in_group is None:
+    if num_key_value_heads is None:
         return 0
-    n_kv_heads = n_head // n_heads_in_group
     head_size = n_embd // n_head
-    kv_dim = 2 * n_kv_heads * head_size
+    kv_dim = 2 * num_key_value_heads * head_size
     return kv_dim
 
 
@@ -157,7 +155,7 @@ def subblock_config_to_str(
 
     Returns:
         Formatted string showing subblock type and key parameters (e.g., intermediate_size,
-        n_heads_in_group), or None if input is None.
+        num_key_value_heads), or None if input is None.
     """
     if subblock_config is None:
         return None
@@ -190,8 +188,8 @@ def subblock_config_to_str(
         intermediate_size = subblock_config["intermediate_size"]
         rep += f"  intermediate_{intermediate_size}".ljust(8)
     elif subblock_name == "attention":
-        n_heads_in_group = subblock_config["n_heads_in_group"]
-        rep += f"  gqa_{n_heads_in_group}".ljust(8)
+        num_key_value_heads = subblock_config["num_key_value_heads"]
+        rep += f"  kv_heads_{num_key_value_heads}".ljust(8)
     elif subblock_name == "mamba":
         mamba_num_heads = subblock_config["mamba"]["num_heads"]
         mamba_head_dim = subblock_config["mamba"]["head_dim"]

@@ -494,7 +494,7 @@ def add_int8_runtime_estimates(subblock_stats: list[dict]) -> None:
                     if (subblock_config := curr_subblock.get("subblock_config")) is not None:
                         if hasattr(subblock_config, "__dataclass_fields__"):
                             subblock_config = dataclasses.asdict(subblock_config)
-                        is_attention = subblock_config.get("n_heads_in_group", None) is not None
+                        is_attention = subblock_config.get("num_key_value_heads", None) is not None
                     runtime_factor = attention_factor if is_attention else ffn_factor
                     for stat_name, stat_value in bf16_subblock.items():
                         if "runtime" in stat_name:
