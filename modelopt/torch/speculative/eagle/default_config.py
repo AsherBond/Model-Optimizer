@@ -45,6 +45,7 @@ default_eagle_config = {
     "parallel_draft_heads_num_layers": 1,
     "has_lm_head": False,
     "head_dim": 128,
+    "sliding_window": None,
 }
 
 default_kimik2_eagle_config = {

@@ -43,6 +43,7 @@ from transformers.models.llama.modeling_llama import (
     LlamaRMSNorm,
     LlamaRotaryEmbedding,
 )
+from transformers.models.mistral.modeling_mistral import MistralAttention
 from transformers.trainer_pt_utils import LabelSmoother
 from transformers.utils import ModelOutput
 from transformers.utils.quantization_config import QuantizationMethod
@@ -60,6 +61,65 @@ from ..utils import (
 )
 
 IGNORE_TOKEN_ID = LabelSmoother.ignore_index
+
+
+class SWALlamaDecoderLayer(LlamaDecoderLayer):
+    """Llama Decoder Layer with SWA support."""
+
+    def __init__(self, config, layer_idx):
+        """Init function for SWALlamaDecoderLayer."""
+        super().__init__(config, layer_idx)
+        if getattr(config, "sliding_window", None) is not None:
+            self.swa = MistralAttention(config, layer_idx)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        cache_position: torch.LongTensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Forward function for SWALlamaDecoderLayer."""
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        # Self Attention
+        sa_hidden_states, _ = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        # Sliding Window Attention
+        if hasattr(self, "swa"):
+            swa_hidden_states = self.swa(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                position_embeddings=position_embeddings,
+                **kwargs,
+            )
+
+        hidden_states = residual + sa_hidden_states
+        if hasattr(self, "swa"):
+            hidden_states = hidden_states + swa_hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
 
 
 @MedusaDMRegistry.register({PreTrainedModel: "hf.PreTrainedModel"})
@@ -517,7 +577,7 @@ class HFEagleModel(EagleModel):
 
         if eagle_decoder_type == "llama":
             # Use default eagle config
-            decoder_cls = LlamaDecoderLayer
+            decoder_cls = SWALlamaDecoderLayer
         elif eagle_decoder_type == "kimik2":
             decoder_cls = _setup_kimi_k2_decoder()
 
