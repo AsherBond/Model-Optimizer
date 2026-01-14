@@ -22,6 +22,7 @@ import tempfile
 import warnings
 from builtins import ValueError
 from collections import defaultdict
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -128,45 +129,45 @@ def _is_enabled_quantizer(quantizer):
     return False
 
 
-def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
-    """Group modules that take the same input and register shared parameters in module."""
-    # TODO: Handle DBRX MoE
-    input_to_linear = defaultdict(list)
-    output_to_layernorm = defaultdict(None)
-    quantization_format = get_quantization_format(model)
+def _collect_shared_input_modules(
+    model: nn.Module,
+    dummy_forward_fn: Callable[[], None],
+    collect_layernorms: bool = False,
+) -> tuple[dict, dict | None]:
+    """Collect modules that share the same input using forward hooks.
+
+    This is a common helper for both LLM and diffusion model fusion.
+
+    Args:
+        model: The model to analyze.
+        dummy_forward_fn: A callable that runs a dummy forward pass on the model.
+            Should be a function that takes no arguments.
+        collect_layernorms: If True, also collect layernorm output mappings (for AWQ).
+
+    Returns:
+        A tuple of (input_to_linear, output_to_layernorm).
+        input_to_linear: Dict mapping input tensor to list of modules sharing that input.
+        output_to_layernorm: Dict mapping layernorm output to the layernorm module (or None).
+    """
+    input_to_linear: dict = defaultdict(list)
+    output_to_layernorm: dict | None = defaultdict(lambda: None) if collect_layernorms else None
 
     def _input_hook(module, input, output):
-        """Update dictionary with list of all modules that share the same input."""
-        # TODO: Handle DBRX MoE case
-        input_to_linear[input[0]].append(module)
+        """Collect modules that share the same input tensor."""
+        if len(input) > 0 and isinstance(input[0], torch.Tensor):
+            # Use tensor data pointer as key to identify same tensor
+            input_to_linear[input[0].data_ptr()].append(module)
 
     def _output_hook(module, input, output):
-        """Update dictionary with mapping of layernorms and their outputs."""
-        output_to_layernorm[output] = module
+        """Collect layernorm output mappings."""
+        if output_to_layernorm is not None and isinstance(output, torch.Tensor):
+            output_to_layernorm[output.data_ptr()] = module
 
     handles = []
-    model_type = type(model).__name__.lower()
 
-    fused_linears = {}
-    module_names = set()
-
-    # Fuse pre_quant_scale to the linear weights if possible
-    if quantization_format is not None and "nvfp4_awq" in quantization_format.lower():
-        fuse_prequant_to_linear(model)
-
+    # Register hooks on all quantized linear modules (and optionally layernorms)
     for name, module in model.named_modules():
-        module_names.add(name)
-
-        # For MoE models update pre_quant_scale to average pre_quant_scale amongst experts
-        if is_moe(module) and ("awq" in quantization_format):
-            # update_experts_avg_prequant_scale(module)
-            grouped_experts = get_experts_list(module, model_type)
-            for modules in grouped_experts:
-                with fsdp2_aware_weight_update(model, modules):
-                    preprocess_linear_fusion(modules, resmooth_only=True)
-
-        # Attach hook to layernorm modules that need to be fused
-        if is_layernorm(module):
+        if collect_layernorms and is_layernorm(module):
             module.name = name
             handle = module.register_forward_hook(_output_hook)
             handles.append(handle)
@@ -178,7 +179,127 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
             handle = module.register_forward_hook(_input_hook)
             handles.append(handle)
 
-    with torch.no_grad():
+    if not handles:
+        return input_to_linear, output_to_layernorm
+
+    # Run dummy forward pass to collect modules sharing same input
+    try:
+        with torch.no_grad(), set_quantizer_by_cfg_context(model, {"*": {"enable": False}}):
+            dummy_forward_fn()
+    finally:
+        # Always remove hooks
+        for handle in handles:
+            handle.remove()
+
+    return input_to_linear, output_to_layernorm
+
+
+def _fuse_shared_input_modules(
+    model: nn.Module,
+    input_to_linear: dict,
+    output_to_layernorm: dict | None = None,
+    qkv_only: bool = False,
+    fuse_layernorms: bool = False,
+    quantization_format: str | None = None,
+) -> dict[str, list[str]]:
+    """Fuse modules that share the same input.
+
+    This is a common helper for both LLM and diffusion model fusion.
+
+    Args:
+        model: The model being processed (for FSDP-aware updates).
+        input_to_linear: Dict mapping input tensor to list of modules sharing that input.
+        output_to_layernorm: Dict mapping layernorm output to the layernorm module (optional).
+        qkv_only: If True, only fuse QKV projection layers (for diffusion models).
+        fuse_layernorms: If True, also fuse layernorms with pre_quant_scale (for AWQ).
+        quantization_format: The quantization format of the model.
+
+    Returns:
+        Dict mapping first module name to list of all fused module names.
+    """
+    fused_linears = {}
+    fused_count = 0
+
+    for tensor, modules in input_to_linear.items():
+        if quantization_format is None and modules:
+            quantization_format = get_quantization_format(modules[0])
+
+        if len(modules) > 1 and quantization_format not in [
+            QUANTIZATION_FP8,
+            QUANTIZATION_NONE,
+            QUANTIZATION_FP8_PB_REAL,
+        ]:
+            if qkv_only:
+                # Filter to only include QKV projection layers (diffusion models)
+                qkv_modules = [m for m in modules if _is_qkv_projection(getattr(m, "name", ""))]
+
+                if len(qkv_modules) > 1:
+                    # Group QKV modules by their parent attention block
+                    qkv_groups: dict[str, list[nn.Module]] = defaultdict(list)
+                    for m in qkv_modules:
+                        group_key = _get_qkv_group_key(getattr(m, "name", ""))
+                        qkv_groups[group_key].append(m)
+
+                    # Fuse each group separately
+                    for group_key, group_modules in qkv_groups.items():
+                        if len(group_modules) > 1:
+                            preprocess_linear_fusion(group_modules, resmooth_only=False)
+                            fused_count += 1
+                            module_names = [getattr(m, "name", "unknown") for m in group_modules]
+                            print(f"  Fused QKV group: {module_names}")
+            else:
+                # Fuse all modules that have the same input (LLM models)
+                with fsdp2_aware_weight_update(model, modules):
+                    preprocess_linear_fusion(modules)
+                fused_linears[modules[0].name] = [module.name for module in modules]
+                fused_count += 1
+
+            # Fuse layernorms (for AWQ)
+            if (
+                fuse_layernorms
+                and output_to_layernorm is not None
+                and quantization_format is not None
+                and quantization_format != QUANTIZATION_NONE
+                and "awq" in quantization_format
+                and tensor in output_to_layernorm
+            ):
+                with fsdp2_aware_weight_update(model, output_to_layernorm[tensor]):
+                    fuse_prequant_layernorm(output_to_layernorm[tensor], modules)
+
+    if qkv_only:
+        if fused_count > 0:
+            print(f"Fused {fused_count} QKV group(s) for unified amax values.")
+        else:
+            print("No QKV groups found to fuse.")
+
+    return fused_linears
+
+
+def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
+    """Group modules that take the same input and register shared parameters in module."""
+    # TODO: Handle DBRX MoE
+    quantization_format = get_quantization_format(model)
+    model_type = type(model).__name__.lower()
+    module_names = set()
+
+    # Fuse pre_quant_scale to the linear weights if possible
+    if quantization_format is not None and "nvfp4_awq" in quantization_format.lower():
+        fuse_prequant_to_linear(model)
+
+    # Pre-process MoE experts
+    for name, module in model.named_modules():
+        module_names.add(name)
+
+        # For MoE models update pre_quant_scale to average pre_quant_scale amongst experts
+        if is_moe(module) and ("awq" in quantization_format):
+            # update_experts_avg_prequant_scale(module)
+            grouped_experts = get_experts_list(module, model_type)
+            for modules in grouped_experts:
+                with fsdp2_aware_weight_update(model, modules):
+                    preprocess_linear_fusion(modules, resmooth_only=True)
+
+    # Define the dummy forward function for LLM
+    def llm_dummy_forward():
         fake_input = torch.ones([1, 2], dtype=torch.long).to(model.device)
         decoder_fake_input = fake_input
 
@@ -194,57 +315,42 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 [1, model.config.num_mel_bins, feature_extractor.nb_max_frames], dtype=model.dtype
             ).to(model.device)
 
-        # Run forward pass so that all modules sharing the same input are collected using forward hook.
+        if getattr(model.config, "is_encoder_decoder", False):
+            # For encoder-decoder models, we need to pass both the encoder and decoder input ids
+            model(fake_input, decoder_input_ids=decoder_fake_input)
+        elif is_vl_model and "nemotron" in model_type:
+            # For Nemotron VL models, try to run optimization on just the language model part
+            language_model_lineage = get_language_model_from_vl(model)
 
-        with set_quantizer_by_cfg_context(model, {"*": {"enable": False}}):
-            if getattr(model.config, "is_encoder_decoder", False):
-                # For encoder-decoder models, we need to pass both the encoder and decoder input ids
-                model(fake_input, decoder_input_ids=decoder_fake_input)
-            elif is_vl_model and "nemotron" in model_type:
-                # For Nemotron VL models, try to run optimization on just the language model part
-                language_model_lineage = get_language_model_from_vl(model)
-
-                if language_model_lineage is not None:
-                    # Run optimization on just the language model with the same input format as regular LLMs
-                    # Use the same fake_input tensor that regular LLMs use
-                    language_model = language_model_lineage[-1]
-                    print(
-                        f"Running optimization on language model with fake_input shape: {fake_input.shape}"
-                    )
-                    language_model(fake_input)
-                else:
-                    raise ValueError(
-                        f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
-                        "This is required for requantization/resmoothing optimization. "
-                        "Please ensure the model architecture is supported or file an issue."
-                    )
+            if language_model_lineage is not None:
+                # Run optimization on just the language model with the same input format as regular LLMs
+                # Use the same fake_input tensor that regular LLMs use
+                language_model = language_model_lineage[-1]
+                print(
+                    f"Running optimization on language model with fake_input shape: {fake_input.shape}"
+                )
+                language_model(fake_input)
             else:
-                model(fake_input)
+                raise ValueError(
+                    f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
+                    "This is required for requantization/resmoothing optimization. "
+                    "Please ensure the model architecture is supported or file an issue."
+                )
+        else:
+            model(fake_input)
 
-        for handle in handles:
-            handle.remove()
+    input_to_linear, output_to_layernorm = _collect_shared_input_modules(
+        model, llm_dummy_forward, collect_layernorms=True
+    )
 
-    for tensor, modules in input_to_linear.items():
-        quantization_format = get_quantization_format(modules[0])
-        if len(modules) > 1 and quantization_format not in [
-            QUANTIZATION_FP8,
-            QUANTIZATION_NONE,
-            QUANTIZATION_FP8_PB_REAL,
-        ]:
-            # Fuse modules that have the same input
-            with fsdp2_aware_weight_update(model, modules):
-                preprocess_linear_fusion(modules)
-            fused_linears[modules[0].name] = [module.name for module in modules]
-
-        # Fuse layernorms
-        if (
-            quantization_format is not QUANTIZATION_NONE
-            and "awq" in quantization_format
-            and tensor in output_to_layernorm
-        ):
-            # Pre quant scale of modules is already updated to avg_pre_quant_scale
-            with fsdp2_aware_weight_update(model, output_to_layernorm[tensor]):
-                fuse_prequant_layernorm(output_to_layernorm[tensor], modules)
+    fused_linears = _fuse_shared_input_modules(
+        model,
+        input_to_linear,
+        output_to_layernorm,
+        qkv_only=False,
+        fuse_layernorms=True,
+        quantization_format=quantization_format,
+    )
 
     # The dummy forward may not be able to activate all the experts.
     # Process experts by naming rules like experts.0, experts.1, etc.
@@ -924,100 +1030,51 @@ def _fuse_qkv_linears_diffusion(model: nn.Module) -> None:
     Args:
         model: The diffusion model component (e.g., transformer, unet).
     """
-    from modelopt.torch.quantization import set_quantizer_by_cfg_context
-
-    input_to_linear: dict[int, list[nn.Module]] = defaultdict(list)
     quantization_format = get_quantization_format(model)
 
     if quantization_format == QUANTIZATION_NONE:
         return
 
-    def _input_hook(module, input, output):
-        """Collect modules that share the same input tensor."""
-        if len(input) > 0 and isinstance(input[0], torch.Tensor):
-            # Use tensor data pointer as key to identify same tensor
-            input_to_linear[input[0].data_ptr()].append(module)
+    # Define the dummy forward function for diffusion models
+    def diffusion_dummy_forward():
+        device = next(model.parameters()).device
+        dtype = next(model.parameters()).dtype
 
-    handles = []
+        # Generate appropriate dummy inputs based on model type
+        dummy_inputs = _generate_diffusion_dummy_inputs(model, device, dtype)
 
-    # Register hooks on all quantized linear modules
-    for name, module in model.named_modules():
-        if is_quantlinear(module) and (
-            _is_enabled_quantizer(module.input_quantizer)
-            or _is_enabled_quantizer(module.weight_quantizer)
-        ):
-            module.name = name
-            handle = module.register_forward_hook(_input_hook)
-            handles.append(handle)
+        if dummy_inputs is None:
+            model_class_name = type(model).__name__
+            raise ValueError(
+                f"Unknown model type '{model_class_name}', cannot generate dummy inputs."
+            )
 
-    if not handles:
-        print("No quantized linear modules found for QKV fusion.")
-        return
+        # Run forward pass with dummy inputs
+        model(**dummy_inputs)
 
-    # Run dummy forward pass to collect modules sharing same input
+    # Collect modules sharing the same input
     try:
-        with torch.no_grad():
-            device = next(model.parameters()).device
-            dtype = next(model.parameters()).dtype
-
-            # Disable quantizers during dummy forward to avoid numerical issues
-            with set_quantizer_by_cfg_context(model, {"*": {"enable": False}}):
-                # Generate appropriate dummy inputs based on model type
-                dummy_inputs = _generate_diffusion_dummy_inputs(model, device, dtype)
-
-                if dummy_inputs is None:
-                    model_class_name = type(model).__name__
-                    print(f"Warning: Unknown model type '{model_class_name}', skipping QKV fusion.")
-                    for handle in handles:
-                        handle.remove()
-                    return
-
-                # Run forward pass with dummy inputs
-                model(**dummy_inputs)
-
+        input_to_linear, _ = _collect_shared_input_modules(
+            model, diffusion_dummy_forward, collect_layernorms=False
+        )
     except Exception as e:
         print(f"Warning: Failed to run dummy forward for QKV fusion: {e}")
         print("Skipping QKV fusion. Quantization may still work but amax values won't be unified.")
-        for handle in handles:
-            handle.remove()
         return
 
-    # Remove hooks
-    for handle in handles:
-        handle.remove()
+    if not input_to_linear:
+        print("No quantized linear modules found for QKV fusion.")
+        return
 
-    # Process modules that share the same input
-    fused_count = 0
-    for modules in input_to_linear.values():
-        if len(modules) > 1 and quantization_format not in [
-            QUANTIZATION_FP8,
-            QUANTIZATION_NONE,
-            QUANTIZATION_FP8_PB_REAL,
-        ]:
-            # Filter to only include QKV projection layers
-            qkv_modules = [m for m in modules if _is_qkv_projection(getattr(m, "name", ""))]
-
-            if len(qkv_modules) > 1:
-                # Group QKV modules by their parent attention block
-                # This ensures we only fuse Q, K, V within the same attention layer
-                qkv_groups: dict[str, list[nn.Module]] = defaultdict(list)
-                for m in qkv_modules:
-                    group_key = _get_qkv_group_key(getattr(m, "name", ""))
-                    qkv_groups[group_key].append(m)
-
-                # Fuse each group separately
-                for group_key, group_modules in qkv_groups.items():
-                    if len(group_modules) > 1:
-                        # These are QKV modules from the same attention block - fuse their amax values
-                        preprocess_linear_fusion(group_modules, resmooth_only=False)
-                        fused_count += 1
-                        module_names = [getattr(m, "name", "unknown") for m in group_modules]
-                        print(f"  Fused QKV group: {module_names}")
-
-    if fused_count > 0:
-        print(f"Fused {fused_count} QKV group(s) for unified amax values.")
-    else:
-        print("No QKV groups found to fuse.")
+    # Fuse the collected modules (QKV only for diffusion)
+    _fuse_shared_input_modules(
+        model,
+        input_to_linear,
+        output_to_layernorm=None,
+        qkv_only=True,
+        fuse_layernorms=False,
+        quantization_format=quantization_format,
+    )
 
 
 def _get_diffusers_components(
