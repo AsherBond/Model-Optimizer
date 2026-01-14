@@ -123,8 +123,12 @@ def megatron_prefill(
     else:
         logits_dtype = torch.float32
 
+    seq_length_percp = seq_length // model.config.context_parallel_size
+
     logits = broadcast_from_last_pipeline_stage(
-        [max_batch_size, seq_length, model.vocab_size], logits_dtype, logits
+        [max_batch_size, seq_length_percp, model.vocab_size],
+        logits_dtype,
+        logits,
     )
 
     return logits
