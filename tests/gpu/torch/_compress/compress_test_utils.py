@@ -141,9 +141,16 @@ def create_and_save_small_hf_model(
         config.num_key_value_heads = 8
         config.max_position_embeddings = 512
 
+        # Fix rope_scaling to be consistent with max_position_embeddings
+        if hasattr(config, "rope_scaling") and config.rope_scaling is not None:
+            config.rope_scaling["original_max_position_embeddings"] = 256
+
         # NemotronH requires hybrid_override_pattern to match num_hidden_layers
         if hasattr(config, "hybrid_override_pattern") and hybrid_override_pattern is not None:
             config.hybrid_override_pattern = hybrid_override_pattern
+
+    # Set seed for reproducible weight initialization
+    torch.manual_seed(42)
 
     # Create and save the model
     # TODO: Consider using AutoModel.from_config instead.

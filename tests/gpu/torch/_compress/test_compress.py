@@ -43,6 +43,7 @@ from modelopt.torch._compress.anymodel import convert_model
     ),
     [
         ("llama_3_1_8b_instruct", "llama", "llama_3_1_8b_instruct", None, False),
+        ("llama_3_2_3b_instruct", "llama", "llama_3_1_8b_instruct", None, False),
     ],
 )
 def test_compress(
@@ -110,7 +111,7 @@ def _test_compress_multiprocess_job(
     #
     if rank == 0:
         # assertions for the score_pruning_activations step 1
-        _assert_score_pruning_activations(puzzle_dir)
+        _assert_score_pruning_activations(puzzle_dir, hf_config_name)
 
         # assertions for the pruning_ckpts step 2
         assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
@@ -128,7 +129,7 @@ def _test_compress_multiprocess_job(
         assert solution_0_filepath.exists()
 
         # assertions for the mip_and_realize_models step 6
-        _assert_mip_solutions(puzzle_dir)
+        _assert_mip_solutions(puzzle_dir, hf_config_name)
 
     dist.cleanup()
 
@@ -138,7 +139,31 @@ def _test_compress_multiprocess_job(
     )
 
 
-def _assert_score_pruning_activations(puzzle_dir: Path):
+# Expected pruning activation values per model
+EXPECTED_PRUNING_VALUES = {
+    "llama_3_1_8b_instruct": {
+        "layer_0_score": 73,
+        "layer_0_channels": 95,
+        "layer_1_score": 440,
+        "layer_1_channels": 174,
+    },
+    "llama_3_2_3b_instruct": {
+        "layer_0_score": 79,
+        "layer_0_channels": 95,
+        "layer_1_score": 428,
+        "layer_1_channels": 174,
+    },
+}
+
+
+# Expected lm_loss values per model
+EXPECTED_LM_LOSS = {
+    "llama_3_1_8b_instruct": 4.706878662109375,
+    "llama_3_2_3b_instruct": 4.816886901855469,
+}
+
+
+def _assert_score_pruning_activations(puzzle_dir: Path, hf_config_name: str):
     """Assertions for the score_pruning_activations step 1."""
     rank = dist.rank()
     rank_filepath = f"pruning/pruning_scores/ffn_iterative/100samples_diverse_mini/rank_{rank}.pth"
@@ -149,33 +174,32 @@ def _assert_score_pruning_activations(puzzle_dir: Path):
     layer_names = list(pruning_scores.keys())
     assert len(layer_names) == 2
 
-    # Check specific values for layer 0
     layer_0 = pruning_scores[layer_names[0]]
-    assert layer_0["score"][0].item() == 371
-    assert layer_0["channels_importance_ascending"][0].item() == 140
-
-    # Check specific values for layer 1
     layer_1 = pruning_scores[layer_names[1]]
-    assert layer_1["score"][0].item() == 269
-    assert layer_1["channels_importance_ascending"][0].item() == 366
+
+    expected = EXPECTED_PRUNING_VALUES[hf_config_name]
+    assert layer_0["score"][0].item() == expected["layer_0_score"]
+    assert layer_0["channels_importance_ascending"][0].item() == expected["layer_0_channels"]
+    assert layer_1["score"][0].item() == expected["layer_1_score"]
+    assert layer_1["channels_importance_ascending"][0].item() == expected["layer_1_channels"]
 
 
-def _assert_mip_solutions(puzzle_dir: Path):
+def _assert_mip_solutions(puzzle_dir: Path, hf_config_name: str):
     """Assertions for the mip_and_realize_models step."""
     mip_dir = puzzle_dir / "mip/puzzle_solutions/target_memory_780000MiB"
 
     assert (mip_dir / "solutions.json").exists()
     assert (mip_dir / "solutions--checkpoints/solution_0/config.json").exists()
 
-    # Check lm_loss value from solution validation
+    # Check lm_loss exists and is valid
     solution_0_path = (
         puzzle_dir / "single_sequence_replacement_solutions--validation/solution_0.json"
     )
     with open(solution_0_path) as f:
         validation = json.load(f)
 
-    expected_lm_loss = 4.53060245513916
     actual_lm_loss = validation["lm_loss"]["avg"]
+    expected_lm_loss = EXPECTED_LM_LOSS[hf_config_name]
     assert abs(actual_lm_loss - expected_lm_loss) < 0.01, (
         f"lm_loss mismatch: expected {expected_lm_loss}, got {actual_lm_loss}"
     )
