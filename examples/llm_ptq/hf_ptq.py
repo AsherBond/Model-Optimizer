@@ -110,7 +110,6 @@ def create_nemotron_parse_calib_wrapper(base_dataloader, processor, device, deco
         device: Device to place tensors on
         decoder_only: If True, only provide decoder inputs (for when quantizing just the decoder)
     """
-    import torch
     from PIL import Image
 
     class NemotronParseCalibWrapper:
@@ -120,12 +119,12 @@ def create_nemotron_parse_calib_wrapper(base_dataloader, processor, device, deco
             self.device = device
             self.decoder_only = decoder_only
             # Create a simple dummy image (will be processed by the model's processor)
-            self.dummy_image = Image.new('RGB', (1024, 1280), color='white')
+            self.dummy_image = Image.new("RGB", (1024, 1280), color="white")
 
         def __iter__(self):
             for batch in self.base_dataloader:
                 # batch contains input_ids and attention_mask from text data
-                batch_size = batch['input_ids'].shape[0]
+                batch_size = batch["input_ids"].shape[0]
 
                 if self.decoder_only:
                     # When calibrating just the decoder, it expects input_ids directly
@@ -138,26 +137,26 @@ def create_nemotron_parse_calib_wrapper(base_dataloader, processor, device, deco
                     dummy_images = [self.dummy_image] * batch_size
 
                     # Use the processor to get properly formatted pixel_values
-                    prompts = ["</s><s><predict_bbox><predict_classes><output_markdown>"] * batch_size
+                    prompts = [
+                        "</s><s><predict_bbox><predict_classes><output_markdown>"
+                    ] * batch_size
                     processed = self.processor(
-                        text=prompts,
-                        images=dummy_images,
-                        return_tensors="pt"
+                        text=prompts, images=dummy_images, return_tensors="pt"
                     )
 
                     # For encoder-decoder models like Nemotron-Parse:
                     # - pixel_values go to the vision encoder
                     # - decoder_input_ids are needed for the decoder
-                    batch['pixel_values'] = processed['pixel_values'].to(self.device)
-                    batch['decoder_input_ids'] = processed['input_ids'].to(self.device)
-                    batch['decoder_attention_mask'] = processed['attention_mask'].to(self.device)
+                    batch["pixel_values"] = processed["pixel_values"].to(self.device)
+                    batch["decoder_input_ids"] = processed["input_ids"].to(self.device)
+                    batch["decoder_attention_mask"] = processed["attention_mask"].to(self.device)
 
                     # Remove the encoder input_ids and attention_mask as they're not needed
                     # The model will use pixel_values for the encoder
-                    if 'input_ids' in batch:
-                        del batch['input_ids']
-                    if 'attention_mask' in batch:
-                        del batch['attention_mask']
+                    if "input_ids" in batch:
+                        del batch["input_ids"]
+                    if "attention_mask" in batch:
+                        del batch["attention_mask"]
 
                     yield batch
 
