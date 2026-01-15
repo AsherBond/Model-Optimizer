@@ -46,6 +46,13 @@ from modelopt.torch._compress.anymodel import convert_model
         ("llama_3_2_3b_instruct", "llama", "llama_3_1_8b_instruct", None, False),
         ("qwen2_5_7b_instruct", "qwen2", "qwen2_5_7b_instruct", None, False),
         ("nemotron-nano-12b-v2", "nemotron_h_v2", "nemotron-nano-12b-v2", "*-", False),
+        (
+            "nemotron-3-nano-30b-a3b-base-bf16",
+            "nemotron_h",
+            "nemotron-3-nano-30b-a3b-base-bf16",
+            "*E",
+            True,
+        ),
     ],
 )
 def test_compress(
@@ -112,14 +119,36 @@ def _test_compress_multiprocess_job(
     # Check assertions
     #
     if rank == 0:
-        # assertions for the score_pruning_activations step 1
-        _assert_score_pruning_activations(puzzle_dir, hf_config_name)
+        if has_moe_layers:
+            # assertions for the score_pruning_activations step 1 (MoE models only)
+            rank_filepath = (
+                f"pruning/pruning_scores/expert_removal/10samples_diverse_mini/rank_{rank}.pth"
+            )
+            assert (puzzle_dir / rank_filepath).is_file(), f"Expected {rank_filepath} to exist"
 
-        # assertions for the pruning_ckpts step 2
-        assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
+            # assertions for the pruning_ckpts step 2
+            assert (puzzle_dir / "ckpts/num_experts_8").exists()
+
+            # assertions for the mip_and_realize_models step 6
+            solution_0_ckpt_config_path = (
+                puzzle_dir
+                / "mip/puzzle_solutions/stats_num_local_experts_1472/solutions--checkpoints/solution_0/config.json"
+            )
+            assert solution_0_ckpt_config_path.exists()
+            assert (
+                puzzle_dir / "mip/puzzle_solutions/stats_num_local_experts_1472/solutions.json"
+            ).exists()
+        else:
+            # assertions for the score_pruning_activations step 1 (FFN pruning)
+            _assert_score_pruning_activations(puzzle_dir, hf_config_name)
+
+            # assertions for the pruning_ckpts step 2
+            assert (puzzle_dir / "ckpts/ffn_256_attn_no_op").exists()
+
+            # assertions for the mip_and_realize_models step 6
+            _assert_mip_solutions(puzzle_dir, hf_config_name)
 
         # assertions for the build_library_and_stats step 4
-
         assert (puzzle_dir / "replacement_library.json").is_file()
         assert (puzzle_dir / "subblock_stats.json").is_file()
 
@@ -127,11 +156,7 @@ def _test_compress_multiprocess_job(
         solution_0_filepath = (
             puzzle_dir / "single_sequence_replacement_solutions--validation/solution_0.json"
         )
-
         assert solution_0_filepath.exists()
-
-        # assertions for the mip_and_realize_models step 6
-        _assert_mip_solutions(puzzle_dir, hf_config_name)
 
     dist.cleanup()
 
@@ -160,6 +185,8 @@ EXPECTED_PRUNING_VALUES = {
     "nemotron-nano-12b-v2": [
         {"score": 70, "channels": 509},
     ],
+    # Note: nemotron-3-nano-30b-a3b-base-bf16 uses MoE expert pruning, not FFN pruning
+    # so it doesn't have EXPECTED_PRUNING_VALUES
 }
 
 
@@ -169,6 +196,7 @@ EXPECTED_LM_LOSS = {
     "llama_3_2_3b_instruct": 4.816886901855469,
     "qwen2_5_7b_instruct": 4.778186798095703,
     "nemotron-nano-12b-v2": 4.79390811920166,
+    # Note: nemotron-3-nano-30b-a3b-base-bf16 uses MoE expert pruning with different MIP path
 }
 
 

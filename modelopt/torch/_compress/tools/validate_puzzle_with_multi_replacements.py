@@ -33,6 +33,7 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
+from modelopt.torch._compress.anymodel.converter import Converter
 from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptorFactory
 from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch._compress.replacement_library.replacement_library import ReplacementLibrary
@@ -142,7 +143,11 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
         else args.solutions_path.with_name(f"{args.solutions_path.stem}--validation")
     )
 
-    replacement_library = ReplacementLibrary(args.replacement_library_path, descriptor=descriptor)
+    replacement_library = ReplacementLibrary(
+        args.replacement_library_path,
+        descriptor=descriptor,
+        model_config_overrides={"use_cache": False},
+    )
 
     teacher_hidden_states = None
     if (args.teacher_dir is not None) and (not args.skip_validation):
@@ -171,8 +176,8 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
         list(zip(args.solutions_to_validate, puzzle_solutions)), desc="Validating solutions"
     ):
         layer_replacements = _extract_layer_replacements_from_puzzle_solution(puzzle_solution)
-        # realizable_as_symlinks = can_realize_as_symlinks(layer_replacements)
-        realizable_as_symlinks = False
+        realizable_as_symlinks = can_realize_as_symlinks(layer_replacements)
+        # realizable_as_symlinks = False
         model_config = replacement_library.create_model_config(layer_replacements)
         if (args.save_models and not realizable_as_symlinks) or (not args.skip_validation):
             model = replacement_library.load_model(layer_replacements)
@@ -185,14 +190,12 @@ def validate_puzzle_solutions(args: DictConfig) -> None:
             )
 
             model_config.dtype = getattr(args, "model_dtype", "torch.bfloat16")
-            model_config.architectures = ["DeciLMForCausalLM"]
+            Converter.copy_checkpoint_files(args.teacher_dir, checkpoint_dir)
             if realizable_as_symlinks:
                 if dist.is_master():
-                    save_checkpoint_as_symlinks(
-                        layer_replacements, model_config, checkpoint_dir, replacement_library
-                    )
-            else:
-                save_checkpoint(model, checkpoint_dir, descriptor)
+                    # save_checkpoint_as_symlinks is currently not supported
+                    pass
+            save_checkpoint(model, checkpoint_dir, descriptor)
 
             copy_tokenizer(args.tokenizer_name, checkpoint_dir)
             copy_deci_lm_hf_code(checkpoint_dir)
