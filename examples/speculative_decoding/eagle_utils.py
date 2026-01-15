@@ -60,6 +60,7 @@ def preprocess(examples, tokenizer, **kwargs):
     for i in range(len(examples)):
         messages = []
         source = examples[i]["conversations"]
+        reasoning_effort = examples[i].get("reasoning_effort", "medium")
 
         # Detect format: either role/content or from/value
         def get_role_content(item):
@@ -72,11 +73,22 @@ def preprocess(examples, tokenizer, **kwargs):
 
         for sentence in source:
             role, content = get_role_content(sentence)
-            messages.append({"role": role.lower(), "content": content})
+            # Some messages have <think> and </think> tags.
+            # We need to separate the reasoning content from the final answer, and add them accordingly.
+            # If there is no <think>, it is all 'content' ('thinking' is None). If there is <think> but no </think>, it is all 'thinking' ('content' is None)
+            if "<think>" in content and "</think>" in content:
+                thinking, content = content.split("<think>")[1].split("</think>")
+            elif "<think>" in content:
+                thinking = content.split("<think>")[1]
+                content = ""
+            else:
+                thinking = ""
+            messages.append({"role": role.lower(), "content": content, "thinking": thinking})
         conversation = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=False,
+            reasoning_effort=reasoning_effort,
         )
 
         output = tokenizer(
@@ -84,7 +96,7 @@ def preprocess(examples, tokenizer, **kwargs):
             return_tensors="pt",
             add_special_tokens=False,
             truncation=True,
-            max_length=4096
+            max_length=1024
         )
         input_ids = output.input_ids[0]
         attention_mask = output.attention_mask[0]
@@ -436,13 +448,13 @@ def make_eagle_supervised_data_module(
         dataset_cls = LazySupervisedDataset if data_args.lazy_preprocess else SupervisedDataset
 
         train_dataset = dataset_cls(
-            data_json[: int(len(data_json) * 0.95)],
+            data_json[: int(len(data_json) * 0.99)],
             tokenizer=tokenizer,
             vlm_processor=vlm_processor,
             img_dir=vlm_img_dir,
         )
         eval_dataset = dataset_cls(
-            data_json[int(len(data_json) * 0.95) :],
+            data_json[int(len(data_json) * 0.99) :],
             tokenizer=tokenizer,
             vlm_processor=vlm_processor,
             img_dir=vlm_img_dir,

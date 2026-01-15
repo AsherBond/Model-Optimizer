@@ -113,7 +113,6 @@ class EagleArguments:
     draft_mode: str = field(
         default="eagle",
         metadata={"help": "The draft mode for eagle module."},
-        choices=["eagle", "pard", "dflash"],
     )
     num_spec_tokens: int = field(
         default=3, metadata={"help": "The number of speculative tokens for eagle module."}

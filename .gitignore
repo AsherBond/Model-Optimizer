@@ -60,3 +60,4 @@ venv/
 **.tar.gz
 **.nemo
 .venv*/
+*.nsys-rep

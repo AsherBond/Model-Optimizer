@@ -35,6 +35,7 @@ from typing import Any, Literal, Unpack
 
 import torch
 from torch import nn
+from torch.cuda import nvtx
 from torch.nn import CrossEntropyLoss
 from torch.nn.attention.flex_attention import BlockMask, create_block_mask
 from transformers import (
@@ -995,6 +996,10 @@ class HFEagleModel(EagleModel):
                 f"{self._base_llm_config.hidden_size}!"
             )
 
+        self.training_dtype = self._base_llm_config.dtype
+        if self.training_dtype is None:
+            self.training_dtype = torch.bfloat16
+
         self.num_spec_tokens = eagle_num_spec_tokens
         self.eval_num_spec_tokens = 7
         self.draft_mode: Literal["eagle", "pard", "dflash"] = eagle_draft_mode
@@ -1050,7 +1055,7 @@ class HFEagleModel(EagleModel):
         self._cached_full_seq_masks = {}
         self._cached_dflash_masks = {}
 
-        self.max_seq_len = 4096
+        self.max_seq_len = 1024
 
     def _get_dflash_attention_mask(self, seq_length, num_spec_tokens):
         cache_key = (seq_length, num_spec_tokens)
@@ -1163,6 +1168,7 @@ class HFEagleModel(EagleModel):
 
         return eagle_input_ids, attention_mask, position_ids
 
+    @nvtx.range("Compute dflash attention mask")
     def _compute_dflash_attention_mask(self, seq_length, num_spec_tokens):
         """Return dflash attention_mask for a sequence."""
 
@@ -1177,7 +1183,7 @@ class HFEagleModel(EagleModel):
             non_context_attn_mask = is_not_context_mode & (kv_local_index == q_local_index)
             return context_attn_mask | non_context_attn_mask
 
-        dtypemin = torch.finfo(self._base_llm_config.dtype).min
+        dtypemin = torch.finfo(self.training_dtype).min
         q_len = seq_length * (1 + num_spec_tokens)  # sampled tokens + one mask for each spec token
         kv_len = seq_length * (
             2 + num_spec_tokens
@@ -1195,10 +1201,11 @@ class HFEagleModel(EagleModel):
                 torch.arange(kv_len).view(1, 1, 1, kv_len),
             ).to(self.device)
             tensor_mask = torch.full_like(
-                tensor_mask, 0, dtype=self._base_llm_config.dtype, device=self.device
+                tensor_mask, 0, dtype=self.training_dtype, device=self.device
             ).masked_fill(~tensor_mask, dtypemin)
             return tensor_mask
 
+    @nvtx.range("Compute full TTT attention mask")
     def _compute_full_ttt_attention_mask(self, seq_length, num_tokens) -> torch.Tensor:
         """Return full TTT attention_mask for a concatenated sequence (no KV cache).
         q_len == kv_len == num_tokens * seq_length.
@@ -1218,7 +1225,7 @@ class HFEagleModel(EagleModel):
 
             return mask
 
-        dtypemin = torch.finfo(self._base_llm_config.dtype).min
+        dtypemin = torch.finfo(self.training_dtype).min
 
         if self.eagle_module.config._attn_implementation == "flex_attention":
             return create_block_mask(msk_func, B=None, H=None, Q_LEN=total_len, KV_LEN=total_len)
@@ -1231,9 +1238,10 @@ class HFEagleModel(EagleModel):
             ).to(self.device)
 
             return torch.full_like(
-                tensor_mask, 0, dtype=self._base_llm_config.dtype, device=self.device
+                tensor_mask, 0, dtype=self.training_dtype, device=self.device
             ).masked_fill(~tensor_mask, dtypemin)
 
+    @nvtx.range("Compute TTT attention mask")
     def _compute_ttt_attention_mask(self, seq_length, ttt_step) -> BlockMask | torch.Tensor:
         """Return TTT attention_mask tensor of type BlockMask or Tensor depends on eagle attn impl."""
 
@@ -1246,7 +1254,7 @@ class HFEagleModel(EagleModel):
                 mask = mask | mask_block_i
             return mask
 
-        dtypemin = torch.finfo(self._base_llm_config.dtype).min
+        dtypemin = torch.finfo(self.training_dtype).min
         q_len = seq_length
         kv_len = seq_length * (1 + ttt_step)
         if self.eagle_module.config._attn_implementation == "flex_attention":
@@ -1262,7 +1270,7 @@ class HFEagleModel(EagleModel):
                 torch.arange(kv_len).view(1, 1, 1, kv_len),
             ).to(self.device)
             tensor_mask = torch.full_like(
-                tensor_mask, 0, dtype=self._base_llm_config.dtype, device=self.device
+                tensor_mask, 0, dtype=self.training_dtype, device=self.device
             ).masked_fill(~tensor_mask, dtypemin)
             return tensor_mask
 
@@ -1297,6 +1305,7 @@ class HFEagleModel(EagleModel):
         else:
             raise ValueError(f"VLM model type {self.config.model_type} not supported")
 
+    @nvtx.range("Base model forward")
     def _base_model_forward(
         self,
         input_ids,
@@ -1344,6 +1353,7 @@ class HFEagleModel(EagleModel):
         )
         return full_logits[:, :, reverse_mapping]
 
+    @nvtx.range("Eagle module forward")
     def _eagle_forward(
         self,
         eagle_input_hidden_states,
@@ -1371,6 +1381,7 @@ class HFEagleModel(EagleModel):
 
         return eagle_postnorm_h, eagle_prenorm_h, eagle_logits, eagle_cache, aux_loss
 
+    @nvtx.range("Main forward")
     def forward(
         self,
         input_ids: torch.LongTensor,
@@ -1576,11 +1587,12 @@ class HFEagleModel(EagleModel):
                 train_accs.append(acc)
             if aux_loss is not None:
                 aux_losses.append(aux_loss)
-        elif self.draft_mode == "eagle3":
+        elif self.draft_mode == "eagle":
             # ====Perform training-time-testing eagle forward passes====
             position_embeddings = self.eagle_rotary_emb(eagle_input_hidden_states, position_ids)
             num_spec_tokens = self.num_spec_tokens if self.training else self.eval_num_spec_tokens
             for ttt_step in range(num_spec_tokens):
+                nvtx.range_push(f"TTT step {ttt_step}")
                 attention_mask = (
                     attention_mask_0
                     if ttt_step == 0
@@ -1627,6 +1639,7 @@ class HFEagleModel(EagleModel):
                 train_accs.append(acc)
                 if aux_loss is not None:
                     aux_losses.append(aux_loss)
+                nvtx.range_pop()
         else:
             raise ValueError(f"Draft mode {self.draft_mode} not supported.")
 
@@ -1647,6 +1660,8 @@ class HFEagleModel(EagleModel):
         if aux_loss is not None:
             loss = loss + aux_loss
 
+        nvtx.mark("Main forward return")
+
         return ModelOutput(
             loss=loss,
             logits=base_model_logits,
@@ -1655,6 +1670,7 @@ class HFEagleModel(EagleModel):
             train_acc=train_accs,
         )
 
+    @nvtx.range("Eagle loss computation")
     def _eagle_loss(
         self,
         base_model_logits,
