@@ -29,7 +29,6 @@ from typing import Any
 import diffusers
 import torch
 import torch.nn as nn
-from diffusers import DiffusionPipeline, ModelMixin
 from safetensors.torch import save_file
 
 try:
