@@ -44,6 +44,7 @@ def megatron_prefill(
     pixel_values: torch.FloatTensor | None = None,
     image_grid_thw: torch.LongTensor | None = None,
     image_sizes: torch.LongTensor | None = None,
+    skip_return_logits: bool = False,
 ) -> torch.Tensor:
     """A simple prefill function for Megatron Core V(LM) models."""
     if not isinstance(model, MegatronModule):
@@ -110,6 +111,8 @@ def megatron_prefill(
         forward_only=True,
         collect_non_loss_data=True,
     )
+    if skip_return_logits:
+        return None
 
     if mpu.is_pipeline_last_stage():
         logits = list_of_logits[0][:, :seq_length, :].detach()
@@ -122,13 +125,8 @@ def megatron_prefill(
         logits_dtype = torch.float16
     else:
         logits_dtype = torch.float32
-
-    seq_length_percp = seq_length // model.config.context_parallel_size
-
     logits = broadcast_from_last_pipeline_stage(
-        [max_batch_size, seq_length_percp, model.vocab_size],
-        logits_dtype,
-        logits,
+        [max_batch_size, seq_length, model.vocab_size], logits_dtype, logits
     )
 
     return logits
