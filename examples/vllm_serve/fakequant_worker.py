@@ -107,16 +107,42 @@ def convert_amax_hf2vllm(
         # Copy other amax keys as-is (like o_proj, down_proj)
         vllm_state_dict[key] = value
 
-    # Merge grouped amax values by taking the maximum
+    # Merge grouped amax values
     for merged_key, key_value_pairs in merge_groups.items():
         if len(key_value_pairs) > 1:
-            # Take the maximum across all values for this merged key
             values = [value for _, value in key_value_pairs]
-            merged_value = torch.stack(values).max(dim=0)[0]
-            vllm_state_dict[merged_key] = merged_value
-            print(f"Merged {len(key_value_pairs)} keys into {merged_key}")
-            for orig_key, _ in key_value_pairs:
-                print(f"  - {orig_key}")
+            shapes = [v.shape for v in values]
+            is_weight_quantizer = "weight_quantizer" in merged_key
+
+            if is_weight_quantizer:
+                # Weight quantizers: always concatenate because vLLM fuses weights
+                # by concatenation (qkv_proj = concat(q, k, v), gate_up_proj = concat(gate, up))
+                merged_value = torch.cat(values, dim=0)
+                vllm_state_dict[merged_key] = merged_value
+                print(
+                    f"Concatenated {len(key_value_pairs)} weight amax keys into {merged_key} "
+                    f"(shapes {shapes} -> {merged_value.shape})"
+                )
+                for orig_key, _ in key_value_pairs:
+                    print(f"  - {orig_key}")
+            # Input quantizers: take max (they share the same input tensor)
+            elif all(s == shapes[0] for s in shapes):
+                merged_value = torch.stack(values).max(dim=0)[0]
+                vllm_state_dict[merged_key] = merged_value
+                print(f"Merged {len(key_value_pairs)} input amax keys into {merged_key}")
+                for orig_key, _ in key_value_pairs:
+                    print(f"  - {orig_key}")
+            else:
+                # Different shapes for input quantizers - this shouldn't happen normally
+                # but handle it gracefully by taking element-wise max after padding
+                merged_value = torch.stack(values).max(dim=0)[0]
+                vllm_state_dict[merged_key] = merged_value
+                print(
+                    f"Warning: Input quantizer amax shapes differ {shapes}, "
+                    f"taking max for {merged_key}"
+                )
+                for orig_key, _ in key_value_pairs:
+                    print(f"  - {orig_key}")
         else:
             # Single key, just rename it
             _, value = key_value_pairs[0]
@@ -263,6 +289,16 @@ def _fakequant_run_prolog_worker(self) -> None:
     quant_kv_cfg = (
         {} if quant_config["kv_quant_cfg"] is None else getattr(mtq, quant_config["kv_quant_cfg"])
     )
+
+    # When loading from amax file, override algorithm to "max" since calibration was done offline.
+    amax_file_path = quant_config["amax_file_path"]
+    if amax_file_path and quant_cfg:
+        original_algorithm = quant_cfg.get("algorithm")
+        if isinstance(original_algorithm, dict) or original_algorithm not in ["max", None]:
+            print(
+                f"Overriding algorithm from {original_algorithm} to 'max' since loading from amax file"
+            )
+            quant_cfg = {**quant_cfg, "algorithm": "max"}
 
     model = self.model_runner.model
     if hasattr(model, "unwrap"):
