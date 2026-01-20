@@ -51,7 +51,7 @@ def test_export_diffusers_unet_quantized_matches_llm_config(tmp_path, monkeypatc
 
     import modelopt.torch.export.unified_export_hf as unified_export_hf
 
-    monkeypatch.setattr(unified_export_hf, "_has_quantized_modules", lambda *_: True)
+    monkeypatch.setattr(unified_export_hf, "has_quantized_modules", lambda *_: True)
 
     fuse_calls = {"count": 0}
     process_calls = {"count": 0}
