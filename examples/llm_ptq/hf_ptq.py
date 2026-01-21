@@ -602,11 +602,14 @@ def mono_quantize(
             if is_nemotron_parse:
                 # For Nemotron-Parse, wrap the model to force use_cache=False
                 print("Wrapping Nemotron-Parse model for calibration (use_cache=False)")
-                original_forward = language_model.forward
+                # Store original forward before wrapping
+                _original_forward = language_model.forward
+                original_forward = _original_forward  # Capture in outer scope
 
                 def wrapped_forward(*args, **kwargs):
                     kwargs["use_cache"] = False
-                    return original_forward(*args, **kwargs)
+                    # Call the captured forward method
+                    return _original_forward(*args, **kwargs)
 
                 # Temporarily replace forward method
                 language_model.forward = wrapped_forward
