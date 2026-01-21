@@ -45,6 +45,13 @@ if __name__ == "__main__":
     torch.nn.modules.normalization.RMSNorm = DiffuserRMSNorm
 
 from diffusers import DiffusionPipeline, LTXLatentUpsamplePipeline
+from models_utils import (
+    MODEL_DEFAULTS,
+    MODEL_PIPELINE,
+    MODEL_REGISTRY,
+    ModelType,
+    get_model_filter_func,
+)
 from onnx_utils.export import generate_fp8_scales, modelopt_export_sd
 from tqdm import tqdm
 from utils import check_conv_and_mha, check_lora, load_calib_prompts
@@ -52,14 +59,6 @@ from utils import check_conv_and_mha, check_lora, load_calib_prompts
 import modelopt.torch.opt as mto
 import modelopt.torch.quantization as mtq
 from modelopt.torch.export import export_hf_checkpoint
-
-from .models_utils import (
-    MODEL_DEFAULTS,
-    MODEL_PIPELINE,
-    MODEL_REGISTRY,
-    ModelType,
-    get_model_filter_func,
-)
 
 
 class DataType(str, Enum):
