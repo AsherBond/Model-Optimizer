@@ -83,6 +83,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "w4a8_nvfp4_fp8": mtq.W4A8_NVFP4_FP8_CFG,
     "w4a8_mxfp4_fp8": mtq.W4A8_MXFP4_FP8_CFG,
     "nvfp4_mlp_only": mtq.NVFP4_MLP_ONLY_CFG,
+    "nvfp4_svdquant": mtq.NVFP4_SVDQUANT_DEFAULT_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
@@ -506,6 +507,10 @@ def export_quantized(
             or args.sparsity_fmt != "dense"
             or "int8_sq" in args.qformat
         ):
+            if (
+                args.inference_tensor_parallel != 1 or args.inference_pipeline_parallel != 1
+            ) and args.qformat == "nvfp4_svdquant":
+                raise NotImplementedError("Svdquant does not support multiple GPUs yet.")
             warnings.warn(
                 "Still exporting TensorRT-LLM checkpoints for models not supported by the TensorRT-LLM torch runtime."
             )
@@ -575,7 +580,10 @@ def pre_quantize(
     ][0:1]
 
     # Generate preview before quantization
-    if is_nemotron_vl_model and tokenizer is not None:
+    if model_type == "deepseek":
+        # DeepSeek generation may go OOM, so we skip it
+        generated_ids_before_ptq = None
+    elif is_nemotron_vl_model and tokenizer is not None:
         generated_ids_before_ptq = run_nemotron_vl_preview(
             full_model,
             tokenizer,
@@ -618,7 +626,9 @@ def post_quantize(
     # Run some samples
     torch.cuda.empty_cache()
     generated_ids_after_ptq = None
-    if model_type != "llama4" and not is_nemotron_vl_model:
+    if generated_ids_before_ptq is None:
+        pass
+    elif model_type != "llama4" and not is_nemotron_vl_model:
         # Our fake quantizer may not be fully compatible with torch.compile.
         generated_ids_after_ptq = full_model.generate(preview_input_ids, max_new_tokens=100)
     elif is_nemotron_vl_model and tokenizer is not None:
