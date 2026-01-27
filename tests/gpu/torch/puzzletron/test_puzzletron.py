@@ -24,7 +24,7 @@ from _test_utils.torch.distributed.utils import spawn_multiprocess_job
 from gpu.torch.puzzletron.compress_test_utils import setup_test_model_and_data
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch.puzzletron import compress
+from modelopt.torch.puzzletron import puzzletron
 from modelopt.torch.puzzletron.anymodel import convert_model
 
 # The e2e test to compress a model based on Local Neural Architecture Search (Mixed Integer Programing NAS search)
@@ -64,7 +64,7 @@ from modelopt.torch.puzzletron.anymodel import convert_model
         ),
     ],
 )
-def test_compress(
+def test_puzzletron(
     project_root_path: Path,
     tmp_path: Path,
     hf_config_name: str,
@@ -76,7 +76,7 @@ def test_compress(
     spawn_multiprocess_job(
         size=torch.cuda.device_count(),
         job=partial(
-            _test_compress_multiprocess_job,
+            _test_puzzletron_multiprocess_job,
             project_root_path,
             tmp_path,
             hf_config_name,
@@ -89,7 +89,7 @@ def test_compress(
     )
 
 
-def _test_compress_multiprocess_job(
+def _test_puzzletron_multiprocess_job(
     project_root_path: Path,
     tmp_path: Path,
     hf_config_name: str,
@@ -120,7 +120,7 @@ def _test_compress_multiprocess_job(
     dist.barrier()
 
     # Compress the model using a one-click approach
-    compress.compress(
+    puzzletron.compress(
         str(hydra_config_dir), hydra_config_subdir, str(puzzle_dir), str(dataset_path)
     )
 
@@ -170,7 +170,7 @@ def _test_compress_multiprocess_job(
     dist.cleanup()
 
     print(
-        f"PYTEST SUMMARY: test_compress({hf_config_name}) test has finished successfully. "
+        f"PYTEST SUMMARY: test_puzzletron({hf_config_name}) test has finished successfully. "
         f"Puzzle directory: {puzzle_dir}"
     )
 
