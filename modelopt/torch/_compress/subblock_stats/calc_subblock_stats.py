@@ -32,10 +32,6 @@ from immutabledict import immutabledict
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from tqdm import tqdm
 
-from modelopt.torch._compress.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
 from modelopt.torch._compress.decilm.deci_lm_hf_code.block_config import (
     AttentionConfig,
     BlockConfig,
@@ -55,6 +51,10 @@ from modelopt.torch._compress.tools.checkpoint_utils import load_model_config
 from modelopt.torch._compress.tools.logger import mprint
 from modelopt.torch._compress.tools.robust_json import json_dump
 from modelopt.torch._compress.utils.parsing import format_global_config
+from modelopt.torch.puzzletron.anymodel.model_descriptor import (
+    ModelDescriptor,
+    ModelDescriptorFactory,
+)
 
 # Type variable for dataclasses
 T_DataClass = TypeVar("T_DataClass")

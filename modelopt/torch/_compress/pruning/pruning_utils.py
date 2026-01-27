@@ -23,8 +23,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 import torch
 from transformers import PretrainedConfig
 
-from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptor
 from modelopt.torch._compress.pruning.pruning_mixin import PruningMixIn
+from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
 
 
 class GQAInitMode(Enum):

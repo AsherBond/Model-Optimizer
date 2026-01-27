@@ -214,7 +214,7 @@ def load_and_shard_model(
         mprint("Initializing model shards")
         # Pass block_configs explicitly so patcher works for VL models where
         # decoder layers receive nested config (e.g., text_config) without block_configs
-        from modelopt.torch._compress.anymodel.puzzformer import deci_x_patcher
+        from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 
         with deci_x_patcher(
             model_descriptor=descriptor, block_configs=getattr(model_config, "block_configs", None)

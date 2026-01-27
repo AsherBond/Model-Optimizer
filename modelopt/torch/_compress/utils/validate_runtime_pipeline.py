@@ -33,7 +33,6 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptor
 from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import LMHead
 from modelopt.torch._compress.sewing_kit import (
     ExternalTarget,
@@ -52,6 +51,7 @@ from modelopt.torch._compress.sewing_kit.utils import (
 from modelopt.torch._compress.tools.checkpoint_utils import init_module_with_state_dict
 from modelopt.torch._compress.tools.sharded_checkpoint_utils import DummyBlock
 from modelopt.torch._compress.utils.validation import _organize_outputs, calculate_batch_outputs
+from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
 
 
 def _log_forward_error(e: Exception, rank: int, batch_idx: int, num_batches: int) -> None:

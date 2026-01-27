@@ -6,7 +6,7 @@ activations_log_dir: ${puzzle_dir}/pruning/pruning_scores/expert_removal/${pruni
 pruning_mixin:
   _target_: modelopt.torch._compress.pruning.expert_removal_pruning_mixin.ExpertRemovalPruningMixIn
   layer_descriptor:
-    _target_: modelopt.torch._compress.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor
+    _target_: modelopt.torch.puzzletron.anymodel.models.nemotron_h.nemotron_h_model_descriptor.NemotronHExpertRemovalLayerDescriptor
     target_name: "mixer"
 
 hook_class: ${get_object:modelopt.torch.nas.plugins.megatron_hooks.base_hooks.NemotronHRemoveExpertsIndependentHook}

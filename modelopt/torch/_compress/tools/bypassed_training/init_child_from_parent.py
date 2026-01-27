@@ -25,11 +25,6 @@ import torch
 import yaml
 from transformers import AutoModelForCausalLM
 
-from modelopt.torch._compress.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch._compress.anymodel.puzzformer import deci_x_patcher
 from modelopt.torch._compress.tools.bypassed_training.child_init import (
     GQAInitMode,
     HiddenSizeInitMode,
@@ -46,6 +41,11 @@ from modelopt.torch._compress.tools.checkpoint_utils_hf import (
 )
 from modelopt.torch._compress.tools.logger import mprint
 from modelopt.torch._compress.tools.sharded_checkpoint_utils import _get_model_class_from_config
+from modelopt.torch.puzzletron.anymodel.model_descriptor import (
+    ModelDescriptor,
+    ModelDescriptorFactory,
+)
+from modelopt.torch.puzzletron.anymodel.puzzformer import deci_x_patcher
 
 
 def init_child_from_parent(

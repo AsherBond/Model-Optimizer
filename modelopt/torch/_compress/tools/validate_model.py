@@ -37,11 +37,6 @@ import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress.activation_scoring.activation_hooks.utils import (
     register_activation_hooks,
 )
-from modelopt.torch._compress.anymodel.model_descriptor import (
-    ModelDescriptor,
-    ModelDescriptorFactory,
-)
-from modelopt.torch._compress.anymodel.puzzformer.no_op import Same
 from modelopt.torch._compress.tools.logger import aprint, mprint
 from modelopt.torch._compress.tools.sharded_checkpoint_utils import (
     load_and_shard_model,
@@ -55,6 +50,11 @@ from modelopt.torch._compress.utils.validate_runtime_pipeline import (
     HiddenStatesAndLMHead,
     calculate_losses_pipeline,
 )
+from modelopt.torch.puzzletron.anymodel.model_descriptor import (
+    ModelDescriptor,
+    ModelDescriptorFactory,
+)
+from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import Same
 
 """
 Two goals:

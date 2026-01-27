@@ -33,8 +33,6 @@ import modelopt.torch._compress.scoring.scoring as scoring
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress import build_library_and_stats
 from modelopt.torch._compress.activation_scoring import score_pruning_activations
-from modelopt.torch._compress.anymodel.converter import ConverterFactory
-from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptorFactory
 from modelopt.torch._compress.tools.hydra_utils import initialize_hydra_config_for_dir
 from modelopt.torch._compress.tools.logger import mprint
 from modelopt.torch.nas.conversion import NASModeRegistry
@@ -47,6 +45,8 @@ from modelopt.torch.opt.mode import (
     RestoreEntrypoint,
 )
 from modelopt.torch.opt.searcher import BaseSearcher, SearchStateDict
+from modelopt.torch.puzzletron.anymodel.converter import ConverterFactory
+from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
 
 
 class CompressModel(nn.Module):

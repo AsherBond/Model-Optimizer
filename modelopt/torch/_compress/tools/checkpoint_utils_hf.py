@@ -157,7 +157,7 @@ def _save_checkpoint(
     descriptor: "ModelDescriptor",
     max_workers: int | None = None,  # Now optional - will auto-calculate if None
 ) -> None:
-    from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptor
+    from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
 
     if not isinstance(checkpoint_dir, Path):
         checkpoint_dir = Path(checkpoint_dir)

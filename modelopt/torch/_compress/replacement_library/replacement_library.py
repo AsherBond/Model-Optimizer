@@ -34,7 +34,6 @@ from torch import nn
 from transformers import PretrainedConfig, PreTrainedModel
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch._compress.anymodel.converter.converter import Converter
 from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch._compress.decilm.deci_lm_hf_code.modeling_decilm import (
     DeciLMDecoderLayer,
@@ -64,6 +63,7 @@ from modelopt.torch._compress.tools.sharded_checkpoint_utils import (
     load_and_shard_model,
     load_sharded_state_dict,
 )
+from modelopt.torch.puzzletron.anymodel.converter.converter import Converter
 
 
 class ReplacementLibrary:

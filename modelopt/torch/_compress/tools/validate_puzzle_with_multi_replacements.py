@@ -33,8 +33,6 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 import modelopt.torch.utils.distributed as dist
-from modelopt.torch._compress.anymodel.converter import Converter
-from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptorFactory
 from modelopt.torch._compress.decilm.deci_lm_hf_code.configuration_decilm import DeciLMConfig
 from modelopt.torch._compress.replacement_library.replacement_library import ReplacementLibrary
 from modelopt.torch._compress.replacement_library.replacement_utils import parse_layer_replacement
@@ -55,6 +53,8 @@ from modelopt.torch._compress.tools.validation_utils import (
 )
 from modelopt.torch._compress.utils.parsing import get_nested_key, parse_path
 from modelopt.torch._compress.utils.validate_runtime_pipeline import perform_pipeline_stitches
+from modelopt.torch.puzzletron.anymodel.converter import Converter
+from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
 
 """
 Usage Example:

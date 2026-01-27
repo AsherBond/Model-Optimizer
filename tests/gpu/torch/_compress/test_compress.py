@@ -25,7 +25,7 @@ from gpu.torch._compress.compress_test_utils import setup_test_model_and_data
 
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch._compress import compress
-from modelopt.torch._compress.anymodel import convert_model
+from modelopt.torch.puzzletron.anymodel import convert_model
 
 # The e2e test to compress a model based on Local Neural Architecture Search (Mixed Integer Programing NAS search)
 # using a one-click command.

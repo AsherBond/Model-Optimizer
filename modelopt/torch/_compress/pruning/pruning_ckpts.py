@@ -27,7 +27,6 @@ from typing import Optional
 
 from omegaconf import DictConfig
 
-from modelopt.torch._compress.anymodel.model_descriptor import ModelDescriptorFactory
 from modelopt.torch._compress.pruning.expert_removal_pruning_mixin import ExpertRemovalPruningMixIn
 from modelopt.torch._compress.pruning.ffn_intermediate_pruning_mixin import (
     FFNIntermediatePruningMixIn,
@@ -45,6 +44,7 @@ from modelopt.torch._compress.tools.bypassed_training.init_child_from_parent imp
 )
 from modelopt.torch._compress.tools.checkpoint_utils import load_model_config
 from modelopt.torch._compress.tools.logger import mprint
+from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptorFactory
 
 
 def launch_ffn_intermediates_prune_ckpt(
