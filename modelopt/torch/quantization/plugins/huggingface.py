@@ -22,6 +22,8 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
+import transformers
+from packaging import version
 from torch import Tensor
 from torch.nn.functional import linear
 
@@ -38,7 +40,6 @@ except ImportError:
     kitchen = None
 
 import torch.nn as nn
-import transformers
 from transformers.models.t5.modeling_t5 import T5Attention
 
 from modelopt.torch.opt.dynamic import DynamicModule
@@ -57,6 +58,8 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 __all__ = ["register_hf_attentions_on_the_fly"]
+
+TRANSFORMERS_VERSION_GE_5_0 = version.parse(transformers.__version__) >= version.parse("5.0.0")
 
 
 class _QuantAttention(QuantModule):
@@ -448,9 +451,24 @@ class _QuantSparseMoe(QuantModule):
             # If any of the experts are in calibration mode, we will forward all tokens to all experts
             # This is used only for calibration, we need to re-calculate the actual outputs again using
             # the original top_k
-            original_top_k = self.top_k
-            self.top_k = self.num_experts
-            super().forward(hidden_states)
+            if TRANSFORMERS_VERSION_GE_5_0:
+                assert hasattr(self, "gate")
+                # Path for transformers >= 5.0
+                original_top_k = self.gate.topk
+                self.gate.topk = self.gate.num_experts
+                super().forward(hidden_states)
+                self.gate.topk = original_top_k
+            else:
+                # Path for transformers < 5.0
+                original_top_k = self.top_k
+                if hasattr(self, "num_experts"):
+                    self.top_k = self.num_experts
+                elif hasattr(self, "experts"):
+                    self.top_k = self.experts.num_experts
+                else:
+                    raise ValueError(f"Could not find num_experts in module {self}")
+                super().forward(hidden_states)
+                self.top_k = original_top_k
             self.top_k = original_top_k
         return super().forward(hidden_states)
 
@@ -961,6 +979,17 @@ def register_falcon_linears_on_the_fly(model):
             QuantModuleRegistry.register({linear_type: linear_type.__name__})(_QuantLinear)
 
 
+def register_minimax_m2_moe_on_the_fly(model):
+    """Register MiniMax M2 MoE modules as a QUANT_MODULE.
+
+    MiniMax M2 MoE modules are defined in the model card, so we need to register them on the fly.
+    """
+    if type(model).__name__ in ["MiniMaxM2ForCausalLM"]:
+        moe_type = type(model.model.layers[0].block_sparse_moe)
+        if QuantModuleRegistry.get(moe_type) is None:
+            QuantModuleRegistry.register({moe_type: moe_type.__name__})(_QuantSparseMoe)
+
+
 def _is_supported_hf_model(model):
     """Check if the model a valid model for transformers quantization specific support."""
     supported_models = [transformers.PreTrainedModel]
@@ -1026,6 +1055,7 @@ CUSTOM_MODEL_PLUGINS.update(
     [
         register_falcon_linears_on_the_fly,
         register_dbrx_moe_on_the_fly,
+        register_minimax_m2_moe_on_the_fly,
         register_hf_attentions_on_the_fly,
         convert_hf_parallel_linears_on_the_fly,
     ]
