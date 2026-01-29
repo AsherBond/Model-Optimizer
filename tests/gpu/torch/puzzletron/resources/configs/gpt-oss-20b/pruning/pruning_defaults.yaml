@@ -1,0 +1,20 @@
+defaults:
+  - /validate_model_defaults
+
+descriptor: ${descriptor}
+model_name_or_path: ${teacher_dir}
+experiment_id: ${pruning.eval_samples}samples_diverse_mini
+activations_log_dir:
+activation_hooks_kwargs:
+
+# Data:
+eval_samples: 10
+micro_batch_size: 4
+dataset_path: ${dataset_path}
+val_dataset_name: train
+
+# Prune ckpts
+pruned_ckpts_output_dir: ${puzzle_dir}/pruning/${pruning.experiment_id}
+
+# Note: GPT-OSS-20B uses MXFP4 quantized MoE which is not currently supported
+# for expert removal pruning. This config exists for framework compatibility.

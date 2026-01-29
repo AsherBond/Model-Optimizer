@@ -1164,3 +1164,39 @@ class Qwen3VLRemoveExpertsIndependentHook(RemoveExpertsIndependentHook):
         )
         routed_experts = hidden_states.view(-1, hidden_states.shape[-1])
         return router_logits_out, routed_experts
+
+
+class GptOssRemoveExpertsIndependentHook(RemoveExpertsIndependentHook):
+    """Expert removal importance hook for GPT-OSS models.
+
+    TODO: Implement get_router_logits_and_routed_experts based on GPT-OSS MoE forward pass.
+    This is a placeholder implementation that allows the framework to run.
+    """
+
+    def get_router_logits_and_routed_experts(
+        self, hidden_states: torch.Tensor, router_logits: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Extract router logits and expert outputs for GPT-OSS MoE.
+
+        Note: This is a placeholder implementation. For proper expert scoring,
+        implement based on GptOssSparseMoeBlock forward pass.
+
+        Args:
+            hidden_states: Input tensor of shape (batch, seq_len, hidden_dim)
+            router_logits: Optional pre-computed router logits
+
+        Returns:
+            tuple of (router_logits, routed_experts):
+                - router_logits: Shape (num_tokens, num_local_experts) - zeros as placeholder
+                - routed_experts: Original hidden states (no-op)
+        """
+        batch_size = (
+            hidden_states.shape[0] * hidden_states.shape[1]
+            if hidden_states.ndim > 2
+            else hidden_states.shape[0]
+        )
+        router_logits_out = torch.zeros(
+            batch_size, self.num_local_experts, device=hidden_states.device
+        )
+        routed_experts = hidden_states.view(-1, hidden_states.shape[-1])
+        return router_logits_out, routed_experts

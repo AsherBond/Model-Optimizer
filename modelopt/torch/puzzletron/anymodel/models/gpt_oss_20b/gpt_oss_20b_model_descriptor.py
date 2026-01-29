@@ -35,10 +35,14 @@ from modelopt.torch.puzzletron.anymodel.puzzformer.no_op import (
     return_tuple_of_size,
 )
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
+from modelopt.torch.puzzletron.pruning.expert_removal_pruning_mixin import (
+    ExpertRemovalLayerDescriptor,
+    ExpertRemovalPruningMixIn,
+)
 
-# Note: Expert removal pruning not supported for MXFP4 quantized MoE
-# Experts are stored in combined tensors (gate_up_proj_blocks, down_proj_blocks)
-# rather than individual per-expert weights
+# Expert removal is supported for unquantized models (test models).
+# Production models use MXFP4 quantized MoE with combined tensors
+# (gate_up_proj_blocks, down_proj_blocks), which is not yet supported.
 from modelopt.torch.puzzletron.pruning.pruning_mixin import PruningMixIn
 
 
@@ -182,9 +186,43 @@ class GptOss20bModelDescriptor(ModelDescriptor):
     def pruning_mixins() -> Dict[str, PruningMixIn]:
         """Return available pruning mixins for GPT-OSS-20B.
 
-        Note: Expert removal is not supported because GPT-OSS uses MXFP4
-        quantized MoE where all experts are stored in combined tensors
-        (gate_up_proj_blocks, down_proj_blocks) rather than individual
-        per-expert weights.
+        Note: Expert removal works for unquantized models (test models).
+        Production models use MXFP4 quantization which is not yet supported.
         """
-        return {}
+        return {
+            "expert_removal": ExpertRemovalPruningMixIn(GptOss20bExpertRemovalLayerDescriptor())
+        }
+
+
+@dataclass
+class GptOss20bExpertRemovalLayerDescriptor(ExpertRemovalLayerDescriptor):
+    """
+    GPT-OSS-20B MoE layer descriptor for expert removal.
+
+    Note: This only works for unquantized models (e.g., test models).
+    Production GPT-OSS models use MXFP4 quantization with fused experts
+    (_blocks, _scales, _bias), which requires a different approach.
+
+    Structure:
+    - Router: mlp.router with .weight and .bias
+    - Experts: mlp.experts.{idx}.{gate_up_proj,down_proj} with .weight and .bias
+    """
+
+    target_name: str = "mlp"
+    moe_prefix_name: str = "model.layers.{layer_idx}.mlp"
+    expert_prefix_name: str = "experts.{expert_idx}"
+
+    # Router has both weight and bias
+    router_weights: List[str] = field(default_factory=lambda: ["router.weight"])
+    router_biases: List[str] = field(default_factory=lambda: ["router.bias"])
+
+    # Per-expert format (unquantized models)
+    expert_weights: List[str] = field(
+        default_factory=lambda: ["gate_up_proj.weight", "down_proj.weight"]
+    )
+    expert_biases: List[str] = field(
+        default_factory=lambda: ["gate_up_proj.bias", "down_proj.bias"]
+    )
+
+    # Not fused for unquantized models
+    is_fused_experts: bool = False

@@ -1,6 +1,5 @@
 defaults:
-  # Note: Expert removal not supported for MXFP4 quantized MoE
-  # - pruning: expert_removal
+  - pruning: expert_removal  # TODO: Note: Works for unquantized test models, not MXFP4 quantized production models
   - scoring: ../validate_solutions_defaults
   - realize_model: ../validate_solutions_defaults
   - bypass:
@@ -17,7 +16,7 @@ dataset_path: ??? # path to v0.4_mini
 skip_realize_model: false
 
 build_replacement_library:
-  add_ffn_no_ops: false  # MXFP4 quantized MoE
+  add_ffn_no_ops: true  # TODO: Works for unquantized test models
   add_attention_no_ops: true
 
 calc_subblock_stats:
