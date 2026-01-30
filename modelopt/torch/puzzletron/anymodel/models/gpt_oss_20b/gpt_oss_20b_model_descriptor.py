@@ -82,9 +82,13 @@ class GptOss20bModelDescriptor(ModelDescriptor):
 
     @staticmethod
     def mlp_no_op_post_init(decoder_layer):
-        """Replace MLP sublayers with no-op modules."""
+        """Replace MLP sublayers with no-op modules.
+
+        Note: GPT-OSS MoE layers return (hidden_states, router_scores), so we need
+        to return a tuple of 2 values.
+        """
         decoder_layer.post_attention_layernorm = Same()
-        decoder_layer.mlp = MatchingZeros()
+        decoder_layer.mlp = return_tuple_of_size(MatchingZeros, size=2)()
 
     @staticmethod
     def init_rotary_embedding(model, runtime):
@@ -192,7 +196,17 @@ class GptOss20bExpertRemovalLayerDescriptor(ExpertRemovalLayerDescriptor):
     router_weights: List[str] = field(default_factory=lambda: ["router.weight"])
     router_biases: List[str] = field(default_factory=lambda: ["router.bias"])
 
-    # Per-expert format (unquantized models have fused tensors without .weight suffix)
+    # Fused format: single tensors containing all experts (test models)
+    fused_expert_weights: List[str] = field(
+        default_factory=lambda: [
+            "experts.gate_up_proj",
+            "experts.gate_up_proj_bias",
+            "experts.down_proj",
+            "experts.down_proj_bias",
+        ]
+    )
+
+    # Not used for fused format, but kept for compatibility
     expert_weights: List[str] = field(default_factory=lambda: ["gate_up_proj", "down_proj"])
     expert_biases: List[str] = field(
         default_factory=lambda: ["gate_up_proj_bias", "down_proj_bias"]
