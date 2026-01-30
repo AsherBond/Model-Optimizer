@@ -831,9 +831,9 @@ def quantize_main(
     # Detect if this is a Nemotron VL model using architecture-based detection
     is_nemotron_vl_model = is_nemotron_vl(full_model)
 
-    preview_input_ids, generated_ids_before_ptq = pre_quantize(
-        args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
-    )
+    # preview_input_ids, generated_ids_before_ptq = pre_quantize(
+    #    args, full_model, model_type, tokenizer, calib_dataloader, is_nemotron_vl_model
+    # )
 
     if args.auto_quantize_bits:
         assert len(args.qformat.split(",")) > 1, (
@@ -893,26 +893,28 @@ def quantize_main(
             assert model_type != "dbrx", f"Does not support export {model_type} without quantizaton"
             print(f"qformat: {args.qformat}. No quantization applied, export {device} model")
 
-    post_quantize(
-        args,
-        full_model,
-        model_type,
-        tokenizer,
-        processor,
-        preview_input_ids,
-        generated_ids_before_ptq,
-        is_nemotron_vl_model,
-        first_text_speech_dataset,
-    )
-    export_quantized(
-        args,
-        full_model,
-        language_model,
-        model_type,
-        tokenizer,
-        default_padding_side,
-        default_pad_token,
-    )
+    full_model.save_pretrained(args.export_path)
+    tokenizer.save_pretrained(args.export_path)
+    # post_quantize(
+    #    args,
+    #    full_model,
+    #    model_type,
+    #    tokenizer,
+    #    processor,
+    #    preview_input_ids,
+    #    generated_ids_before_ptq,
+    #    is_nemotron_vl_model,
+    #    first_text_speech_dataset,
+    # )
+    # export_quantized(
+    #    args,
+    #    full_model,
+    #    language_model,
+    #    model_type,
+    #    tokenizer,
+    #    default_padding_side,
+    #    default_pad_token,
+    # )
 
 
 def parse_args() -> argparse.Namespace:
@@ -1100,17 +1102,46 @@ def main(args: argparse.Namespace):
     # Force eager execution for all model types.
     torch.compiler.set_stance("force_eager")
 
-    (
-        full_model,
-        language_model,
-        model_type,
-        calibration_only,
-        processor,
-        tokenizer,
-        default_padding_side,
-        default_pad_token,
-        device,
-    ) = load_model(args)
+    # (
+    #    full_model,
+    #    language_model,
+    #    model_type,
+    #    calibration_only,
+    #    processor,
+    #    tokenizer,
+    #    default_padding_side,
+    #    default_pad_token,
+    #    device,
+    # ) = load_model(args)
+    from megatron_diffusion_hybrid.dllm_eval.eval import SBD
+    from transformers import AutoTokenizer
+
+    full_model = SBD(
+        checkpoint_path=args.pyt_ckpt_path,
+        mask_token_id=151662,
+        model_flavor="qwen3_8b_sbd_no_shift_bl16_ar1_full_mask",
+        model_name="artalking_qwen",
+        max_sequence_length=4096,
+        max_new_tokens=512,
+        temperature=0.0,
+        diffusion_steps=512,
+        cache_type=None,
+        denoising_threshold=0.0,
+        denoising_threshold_spec=0.9,
+        alg="quadratic_decoding_cache",
+        block_length=16,
+        neg_entropy=True,
+        nfe_log_path="/tmp/nfe_log.json",
+        shift_logits=True,
+    )
+    language_model = full_model
+    model_type = get_model_type(full_model)
+    calibration_only = False
+    processor = None
+    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B", trust_remote_code=True)
+    default_padding_side = tokenizer.padding_side
+    default_pad_token = tokenizer.pad_token
+    device = full_model.device
 
     if args.sparsity_fmt != "dense":
         # Sparse

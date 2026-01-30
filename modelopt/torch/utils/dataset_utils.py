@@ -236,7 +236,7 @@ def get_dataset_dataloader(
         tokenized_dataset = _CustomDataset(batch_encoded)
     else:
         # For backward compatibility, if labels are not needed, we only return the input_ids.
-        tokenized_dataset = _CustomDataset({"input_ids": batch_encoded["input_ids"]})
+        tokenized_dataset = _CustomDataset({"prompt_ids": batch_encoded["input_ids"]})
 
     calib_dataloader = DataLoader(tokenized_dataset, batch_size=batch_size, shuffle=False)
 
@@ -412,7 +412,8 @@ def _forward_loop(model: torch.nn.Module, dataloader: DataLoader) -> None:
     """
     with torch.no_grad():
         is_enc_dec = model_type_is_enc_dec(model)
-        infer_method = model.generate if is_enc_dec else model.forward
+        # infer_method = model.generate if is_enc_dec else model.forward
+        infer_method = model._generate_main_loop
         max_working_batch_size = None  # Initialize max working batch size as None
 
         for _, data in enumerate(tqdm(dataloader)):
