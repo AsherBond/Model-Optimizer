@@ -25,9 +25,6 @@ class BaseImageProcessor:
     def __init__(self, tokenizer, device="cuda"):
         """Constructor."""
         self.tokenizer = tokenizer
-        # Handle invalid device values that can come from multi-GPU models with device_map="auto"
-        if device is None or str(device) in ("auto", "meta", "cpu"):
-            device = "cuda"
         self.device = device
 
     def __call__(self, **kwargs):

@@ -631,7 +631,7 @@ def _process_quantized_modules(
                             _export_quantized_weight(sub_module, dtype, weight_name)
 
 
-def _export_hf_checkpoint(
+def _export_transformers_checkpoint(
     model: nn.Module,
     dtype: torch.dtype | None = None,
     is_modelopt_qlora: bool = False,
@@ -1003,7 +1003,7 @@ def export_hf_checkpoint(
         # Packed weights are only for TRT-LLM consumption
         # Set this to true if you want to save the weights in the original precision
         pack_weights = True
-        post_state_dict, hf_quant_config = _export_hf_checkpoint(
+        post_state_dict, hf_quant_config = _export_transformers_checkpoint(
             model, dtype, pack_weights=pack_weights
         )
 

@@ -244,20 +244,26 @@ def build_quant_cfg(
         quant_cfg["quant_cfg"]["*self_attn.q*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*self_attn.kv*"] = {"enable": False}
 
-        # Qwen3 specific quantizer disabling patterns (thinker.model.layers only)
-        if "qkv_disabled" in qformat:
-            quant_cfg = copy.deepcopy(quant_cfg)  # Don't modify global config
+    if model_type == "qwen3omni":
+        if qformat == "qwen3_nvfp4_qkv_disabled":
             for proj in ["q_proj", "k_proj", "v_proj"]:
                 quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
                     "enable": False
                 }
-        if "qkvo_disabled" in qformat:
-            if "qkv_disabled" not in qformat:  # Avoid double deepcopy
-                quant_cfg = copy.deepcopy(quant_cfg)
-            for proj in ["o_proj"]:
+        elif qformat == "qwen3_nvfp4_qkvo_disabled":
+            for proj in ["q_proj", "k_proj", "v_proj", "o_proj"]:
                 quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
                     "enable": False
                 }
+
+        elif qformat == "qwen3_nvfp4_first_and_last_n_disabled":
+            # Disable both first N and last N layers
+            total_layers = 48
+            n_layers_to_disable = 4
+            for i in range(n_layers_to_disable):
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
+            for i in range(total_layers - n_layers_to_disable, total_layers):
+                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
 
     return quant_cfg
 

@@ -74,7 +74,7 @@ SUPPORTED_DATASET_CONFIG: dict[str, Any] = {
     },
     "cnn_dailymail": {
         "config": {"path": "abisee/cnn_dailymail", "name": "3.0.0", "split": ["train"]},
-        "preprocess": lambda sample: "/no_think " + sample["article"],
+        "preprocess": lambda sample: sample["article"],
     },
     "pile": {
         "config": {"path": "monology/pile-uncopyrighted", "name": "v1.0", "split": ["train"]},
@@ -365,9 +365,8 @@ def get_max_batch_size(
     torch.cuda.empty_cache()
 
     free_mem_before, max_allocated_before = _get_free_gpu_mem()
-    is_enc_dec = model_type_is_enc_dec(model)
-    requires_generate = _model_requires_generate(model)
-    infer_method = model.generate if (is_enc_dec or requires_generate) else model.forward
+    use_generate = _should_use_generate(model)
+    infer_method = model.generate if use_generate else model.forward
 
     if sample_input_single_batch is None:
         sample_input_single_batch = (
@@ -504,9 +503,7 @@ def _forward_loop(model: torch.nn.Module, dataloader: DataLoader) -> None:
         dataloader: DataLoader containing the batched input data
     """
     with torch.no_grad():
-        is_enc_dec = model_type_is_enc_dec(model)
-        requires_generate = _model_requires_generate(model)
-        use_generate = is_enc_dec or requires_generate
+        use_generate = _should_use_generate(model)
         infer_method = model.generate if use_generate else model.forward
         max_working_batch_size = None  # Initialize max working batch size as None
 
@@ -593,13 +590,13 @@ def model_type_is_enc_dec(model):
     return any(model_name in model.__class__.__name__.lower() for model_name in enc_dec_model_list)
 
 
-def _model_requires_generate(model):
-    """Check if model requires generate() instead of forward() for calibration.
+def _should_use_generate(model):
+    """Check if model should use generate() instead of forward() for calibration.
 
-    Some conditional generation models (like Qwen3-Omni) don't have a standard
-    forward(input_ids, ...) signature and need to use generate() for calibration.
+    Returns True for:
+    - Encoder-decoder models (t5, bart, whisper)
+    - Conditional generation models that don't support standard forward() (qwen3omni)
     """
-    # Models that require generate() for calibration instead of forward()
     generate_model_list = ["qwen3omni"]
     model_name = model.__class__.__name__.lower()
-    return any(name in model_name for name in generate_model_list)
+    return model_type_is_enc_dec(model) or any(name in model_name for name in generate_model_list)

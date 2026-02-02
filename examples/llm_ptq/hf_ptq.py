@@ -14,8 +14,6 @@
 # limitations under the License.
 
 import argparse
-import contextlib
-import os
 import random
 import time
 import warnings
@@ -104,7 +102,7 @@ QUANT_CFG_CHOICES: dict[str, dict[str, Any]] = {
     "mxfp8": mtq.MXFP8_DEFAULT_CFG,
     "qwen3_nvfp4_qkv_disabled": mtq.NVFP4_DEFAULT_CFG,
     "qwen3_nvfp4_qkvo_disabled": mtq.NVFP4_DEFAULT_CFG,
-    "qwen3_first_and_last_n_disabled": mtq.NVFP4_DEFAULT_CFG,
+    "qwen3_nvfp4_first_and_last_n_disabled": mtq.NVFP4_DEFAULT_CFG,
 }
 
 KV_QUANT_CFG_CHOICES = {
@@ -199,9 +197,6 @@ def make_calib_dataloader(
             num_samples=args.calib_size[0],
         )
     elif model_type == "qwen3omni":
-        assert len(args.calib_size) == 1, (
-            "qwen3omni only supports one dataset for calibration, can extend this in the future"
-        )
         assert processor is not None, "The processor must be set for qwen3omni model."
         dataset_name = args.dataset[0] if args.dataset else "cnn_dailymail"
         # Check if using video dataset (e.g., finevideo)
@@ -394,10 +389,6 @@ def load_model(args: argparse.Namespace):
             attn_implementation=args.attn_implementation,
         )
 
-        # Uncomment this to load the model from a .pt file
-        # model = mto.restore(model, "./qwen3_omni_30b_nvfp4/model.pt")
-        # print("Qwen3Omni model restored from checkpoint")
-
         quant_cfg = QUANT_CFG_CHOICES[args.qformat]
     else:
         assert args.qformat in QUANT_CFG_CHOICES, (
@@ -425,18 +416,13 @@ def load_model(args: argparse.Namespace):
         calibration_only = True
 
     model_type = get_model_type(full_model)
-    if model_type == "qwen3omni" and os.environ.get("DISABLE_TALKER", "0") == "1":
+    if model_type == "qwen3omni":
         print("Disabling talker for Qwen3Omni model")
         full_model.disable_talker()
 
     device = full_model.device
     if hasattr(full_model, "model"):
         device = full_model.model.device
-    # For multi-GPU models with device_map="auto", model.device may return 'meta' or 'cpu'
-    # since parameters are distributed. Force cuda:0 for input tensors.
-    if device is None or str(device) in ("meta", "cpu"):
-        device = "cuda"
-        print(f"Overriding device to {device}")
 
     processor = None
     tokenizer = None
@@ -620,158 +606,6 @@ def mono_quantize(
             if language_model_lineage is not None:
                 print("Updating full_model with quantized language_model...")
                 language_model_lineage[-2].language_model = language_model
-
-        # Qwen3 specific quantizer disabling patterns (thinker.model.layers only)
-        if "qkv_disabled" in args.qformat:
-            # Disable q_proj, k_proj, v_proj quantizers
-            for proj in ["q_proj", "k_proj", "v_proj"]:
-                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
-                    "enable": False
-                }
-        if "qkvo_disabled" in args.qformat:
-            # Disable q_proj, k_proj, v_proj, o_proj quantizers
-            for proj in ["o_proj"]:
-                quant_cfg["quant_cfg"][f"*thinker.model.layers.*.self_attn.{proj}*"] = {
-                    "enable": False
-                }
-        if "first_and_last_n_disabled" in args.qformat:
-            # Disable both first N and last N layers
-            total_layers = 48
-            n_layers_to_disable = 4
-            for i in range(n_layers_to_disable):
-                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
-            for i in range(total_layers - n_layers_to_disable, total_layers):
-                quant_cfg["quant_cfg"][f"*thinker.model.layers.{i}.*"] = {"enable": False}
-
-        if not model_is_already_quantized or calibration_only:
-            # Only run single sample for preview
-            calib_batch = next(iter(calib_dataloader))
-            input_ids = calib_batch["input_features" if model_type == "whisper" else "input_ids"][
-                0:1
-            ]
-
-            # Generate preview before quantization
-            if is_nemotron_vl_model and tokenizer is not None:
-                generated_ids_before_ptq = run_nemotron_vl_preview(
-                    full_model,
-                    tokenizer,
-                    input_ids,
-                    args.pyt_ckpt_path,
-                    "before quantization",
-                    allow_fallback=True,
-                )
-            elif model_type == "qwen3omni":
-                # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
-                # Pass full batch with all multimodal inputs
-                result = full_model.generate(**calib_batch, max_new_tokens=100)
-                if isinstance(result, tuple):
-                    text_ids, _ = result
-                    generated_ids_before_ptq = (
-                        text_ids.sequences if hasattr(text_ids, "sequences") else text_ids
-                    )
-                else:
-                    generated_ids_before_ptq = result
-            else:
-                # Standard generation for non-Nemotron VL models
-                generated_ids_before_ptq = full_model.generate(input_ids, max_new_tokens=100)
-            if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
-                print("Applying nvfp4 quantization (MoE only) for gpt-oss")
-
-            # quantize the model
-            model = quantize_model(model, quant_cfg, args, calib_dataloader, calibration_only)
-
-            # For VL models, update full_model to use the quantized language model
-            if is_nemotron_vl_model:
-                language_model_lineage = get_language_model_from_vl(full_model)
-                if language_model_lineage is not None:
-                    print("Updating full_model with quantized language_model...")
-                    language_model_lineage[-2].language_model = model
-
-            if args.verbose:
-                with open("./quant_summary.txt", "w") as f, contextlib.redirect_stdout(f):
-                    mtq.print_quant_summary(full_model)
-
-            # Run some samples
-            torch.cuda.empty_cache()
-            generated_ids_after_ptq = None
-            if model_type == "qwen3omni":
-                # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
-                # Pass full batch with all multimodal inputs
-                result = full_model.generate(**calib_batch, max_new_tokens=100)
-                if isinstance(result, tuple):
-                    text_ids, _ = result
-                    generated_ids_after_ptq = (
-                        text_ids.sequences if hasattr(text_ids, "sequences") else text_ids
-                    )
-                else:
-                    generated_ids_after_ptq = result
-            elif model_type != "llama4" and not is_nemotron_vl_model:
-                # Our fake quantizer may not be fully compatible with torch.compile.
-                generated_ids_after_ptq = full_model.generate(input_ids, max_new_tokens=100)
-            elif is_nemotron_vl_model and tokenizer is not None:
-                generated_ids_after_ptq = run_nemotron_vl_preview(
-                    full_model,
-                    tokenizer,
-                    input_ids,
-                    args.pyt_ckpt_path,
-                    "after quantization",
-                    allow_fallback=False,
-                )
-            else:
-                warnings.warn(
-                    "Llama4 Maverick generation after quantization has a bug. Skipping generation sample."
-                )
-
-            def input_decode(input_ids):
-                # BaseImageProcessor covers MllamaImageProcessor and Qwen3OmniImageProcessor
-                if processor is not None and isinstance(processor, BaseImageProcessor):
-                    return processor.tokenizer.batch_decode(input_ids)
-                elif processor is not None and isinstance(processor, WhisperProcessor):
-                    return first_text
-                elif tokenizer is not None:
-                    return tokenizer.batch_decode(input_ids)
-                else:
-                    raise ValueError("The processor or tokenizer must be set")
-
-            def output_decode(generated_ids, input_shape):
-                if is_enc_dec(model_type):
-                    if processor is not None and isinstance(processor, WhisperProcessor):
-                        return processor.tokenizer.batch_decode(
-                            generated_ids, skip_special_tokens=True
-                        )[0]
-                    elif tokenizer is not None:
-                        return tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-                elif processor is not None and isinstance(processor, MllamaImageProcessor):
-                    return processor.tokenizer.batch_decode(generated_ids[:, input_shape:])
-                elif processor is not None and isinstance(processor, Qwen3OmniImageProcessor):
-                    return processor.tokenizer.batch_decode(
-                        generated_ids[:, input_shape:],
-                        skip_special_tokens=True,
-                        clean_up_tokenization_spaces=False,
-                    )
-                elif tokenizer is not None:
-                    return tokenizer.batch_decode(generated_ids[:, input_shape:])
-                else:
-                    raise ValueError("The processor or tokenizer must be set")
-
-            if generated_ids_after_ptq is not None:
-                print("--------")
-                if is_nemotron_vl_model:
-                    # For Nemotron VL models, generated_ids are text strings from model.chat()
-                    print("Nemotron VL model text-only generation results:")
-                    print(f"Text response before quantization: {generated_ids_before_ptq}")
-                    print("--------")
-                    print(f"Text response after quantization: {generated_ids_after_ptq}")
-                    print("--------")
-                    print("Note: Additional VL tests with images were run separately above")
-                else:
-                    # For regular LLMs, generated_ids are token tensors that need decoding
-                    print(f"example test input: {input_decode(input_ids)}")
-                    print("--------")
-                    print(
-                        f"example outputs before ptq: {output_decode(generated_ids_before_ptq, input_ids.shape[1])}"
-                    )
-                    print("--------")
     else:
         warnings.warn("Skipping quantization: model is already quantized.")
 
@@ -785,12 +619,6 @@ def export_quantized(
     default_padding_side,
     default_pad_token,
 ):
-    # Uncomment this to save the model as a .pt file
-    # if model_type == "qwen3omni":
-    #     print("Export of Qwen3Omni model is not supported yet. Saving .pt file instead.")
-    #     os.makedirs(os.path.dirname(args.export_path), exist_ok=True)
-    #     mto.save(full_model, f"{args.export_path}/model.pt")
-
     with torch.inference_mode():
         if model_type is None:
             print(f"Unknown model type {type(language_model).__name__}. Continue exporting...")
