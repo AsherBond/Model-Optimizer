@@ -33,8 +33,11 @@ Usage:
 """
 
 import argparse
+import json
 from datetime import timedelta
 from pathlib import Path
+
+from transformers import AutoConfig
 
 import modelopt.torch.nas as mtn
 import modelopt.torch.puzzletron.mip.mip_and_realize_models as mip_and_realize_models
@@ -122,6 +125,99 @@ def run_full_puzzletron(hydra_config_path: str):
     mprint("Puzzletron Progress 8/8: puzzletron pipeline completed (multi-gpu)")
 
 
+def get_teacher_memory_from_subblock_stats(hydra_cfg) -> float:
+    """Calculate teacher model memory from subblock_stats.json.
+
+    Args:
+        hydra_cfg: Hydra configuration object
+
+    Returns:
+        Total teacher memory in MiB
+    """
+    puzzle_dir = Path(hydra_cfg.puzzle_dir)
+
+    # Load model config to get number of layers and teacher architecture
+    teacher_dir = Path(hydra_cfg.teacher_dir)
+    model_config = AutoConfig.from_pretrained(teacher_dir, trust_remote_code=True)
+    num_layers = model_config.num_hidden_layers
+    teacher_ffn_intermediate = model_config.intermediate_size
+    teacher_num_kv_heads = model_config.num_key_value_heads  # For GQA models
+
+    # Get the MIP configuration
+    mip_subblock_args = hydra_cfg.mip.subblock_stats_args[0]
+    batch_size = mip_subblock_args["batch_size"]
+    weights_dtype = str(mip_subblock_args["weights_dtype"])
+    activations_dtype = str(mip_subblock_args["activations_dtype"])
+    kv_cache_dtype = str(mip_subblock_args["kv_cache_dtype"])
+
+    # Load subblock_stats.json
+    subblock_stats_path = puzzle_dir / "subblock_stats.json"
+    with open(subblock_stats_path) as f:
+        subblock_stats_list = json.load(f)
+
+    # Find the entry matching our MIP configuration and teacher's n_embd
+    matching_stats = None
+    for stats_entry in subblock_stats_list:
+        args = stats_entry["args"]
+        if (
+            args["batch_size"] == batch_size
+            and args["weights_dtype"] == weights_dtype
+            and args["activations_dtype"] == activations_dtype
+            and args["kv_cache_dtype"] == kv_cache_dtype
+            and args.get("n_embd") == model_config.hidden_size
+        ):
+            matching_stats = stats_entry
+            break
+
+    if matching_stats is None:
+        raise ValueError(
+            f"No subblock_stats entry found for batch_size={batch_size}, "
+            f"dtypes=({weights_dtype}, {activations_dtype}, {kv_cache_dtype}), "
+            f"n_embd={model_config.hidden_size}"
+        )
+
+    # Get non-block memory (embeddings, LM head, etc.)
+    total_memory = matching_stats.get("non_block", {}).get("memory_mib", 0.0)
+
+    # Find the teacher FFN and Attention subblocks
+    # Note: Each subblock is EITHER attention OR ffn, not both
+    # We need to find BOTH and add their memory together
+    teacher_ffn_subblock = None
+    teacher_attention_subblock = None
+
+    for subblock in matching_stats.get("subblocks", []):
+        subblock_class = subblock.get("subblock_config_class", "")
+        subblock_config = subblock.get("subblock_config", {})
+
+        # Check for FFN subblocks with teacher's intermediate_size
+        if "FFN" in subblock_class:
+            ffn_size = subblock_config.get("intermediate_size")
+            if ffn_size == teacher_ffn_intermediate and not subblock_config.get("no_op", False):
+                teacher_ffn_subblock = subblock
+
+        # Check for Attention subblocks with teacher's num_key_value_heads
+        elif "Attention" in subblock_class:
+            kv_heads = subblock_config.get("num_key_value_heads")
+            if kv_heads == teacher_num_kv_heads and not subblock_config.get("no_op", False):
+                teacher_attention_subblock = subblock
+
+    if teacher_ffn_subblock is None:
+        raise ValueError(
+            f"Could not find teacher FFN subblock with intermediate_size={teacher_ffn_intermediate}"
+        )
+
+    if teacher_attention_subblock is None:
+        raise ValueError(
+            f"Could not find teacher Attention subblock with num_key_value_heads={teacher_num_kv_heads}"
+        )
+
+    # Calculate total teacher memory: non_block + (ffn_memory + attention_memory) * num_layers
+    per_layer_memory = teacher_ffn_subblock["memory_mib"] + teacher_attention_subblock["memory_mib"]
+    total_memory += per_layer_memory * num_layers
+
+    return total_memory
+
+
 def run_mip_sweep(hydra_cfg):
     """Run MIP for multiple memory compression rates and generate CSV with results.
 
@@ -138,18 +234,24 @@ def run_mip_sweep(hydra_cfg):
     sweep_cfg = hydra_cfg.mip.sweep
     compression_rates = sweep_cfg.memory_compression_rates
     output_csv = sweep_cfg.output_csv
+    puzzle_dir = Path(hydra_cfg.puzzle_dir)
 
     mprint(f"Compression rates: {compression_rates}")
     mprint(f"Output CSV: {output_csv}")
-    mprint(f"Puzzle directory: {hydra_cfg.puzzle_dir}")
+    mprint(f"Puzzle directory: {puzzle_dir}")
+
+    # Calculate teacher memory from subblock_stats and replacement_library
+    teacher_memory = get_teacher_memory_from_subblock_stats(hydra_cfg)
+    mprint(
+        f"Teacher memory (from subblock_stats): {teacher_memory:.1f} MiB ({teacher_memory / 1024:.1f} GiB)"
+    )
 
     # TODO: Implement sweep logic
-    # 1. Load teacher memory from subblock_stats.json
-    # 2. For each compression rate:
+    # 1. For each compression rate:
     #    - Calculate target_memory = teacher_memory * rate
     #    - Run MIP with this target
     #    - Realize and validate model
-    # 3. Collect all results and generate CSV
+    # 2. Collect all results and generate CSV
 
     mprint("=" * 80)
     mprint("MIP sweep functionality will be implemented in next phase")
