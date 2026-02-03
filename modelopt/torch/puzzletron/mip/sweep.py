@@ -18,8 +18,6 @@
 import json
 from pathlib import Path
 
-from transformers import AutoConfig
-
 import modelopt.torch.puzzletron.mip.mip_and_realize_models as mip_and_realize_models
 import modelopt.torch.utils.distributed as dist
 from modelopt.torch.puzzletron.tools.logger import mprint
@@ -44,13 +42,16 @@ def get_teacher_memory_from_subblock_stats(hydra_cfg) -> float:
     """
     puzzle_dir = Path(hydra_cfg.puzzle_dir)
 
-    # Load model config to get number of layers and teacher FFN size
+    # Read config.json directly from the teacher model path
     teacher_dir = Path(hydra_cfg.teacher_dir)
-    # Maybe it is better to read json direclty instead of using AutoConfig - we only need the number of layers and the FFN size.
-    model_config = AutoConfig.from_pretrained(teacher_dir, trust_remote_code=True)
-    num_layers = model_config.num_hidden_layers
-    teacher_ffn_intermediate = model_config.intermediate_size
-    teacher_num_kv_heads = model_config.num_key_value_heads
+    config_file = teacher_dir / "config.json"
+
+    with open(config_file) as f:
+        config_dict = json.load(f)
+
+    num_layers = config_dict["num_hidden_layers"]
+    teacher_ffn_intermediate = config_dict["intermediate_size"]
+    teacher_num_kv_heads = config_dict["num_key_value_heads"]
 
     # Get the MIP configuration
     mip_subblock_args = hydra_cfg.mip.subblock_stats_args[0]
@@ -79,7 +80,7 @@ def get_teacher_memory_from_subblock_stats(hydra_cfg) -> float:
             and args["weights_dtype"] == weights_dtype
             and args["activations_dtype"] == activations_dtype
             and args["kv_cache_dtype"] == kv_cache_dtype
-            and args.get("n_embd") == model_config.hidden_size
+            and args.get("n_embd") == config_dict["hidden_size"]
         ):
             matching_stats = stats_entry
             break
@@ -88,7 +89,7 @@ def get_teacher_memory_from_subblock_stats(hydra_cfg) -> float:
         raise ValueError(
             f"No subblock_stats entry found for batch_size={batch_size}, "
             f"dtypes=({weights_dtype}, {activations_dtype}, {kv_cache_dtype}), "
-            f"n_embd={model_config.hidden_size}"
+            f"n_embd={config_dict['hidden_size']}"
         )
 
     # Get non-block memory (embeddings, LM head, etc.)
