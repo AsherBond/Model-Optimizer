@@ -16,7 +16,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Script to load and run a quantized Qwen3Omni model from export_hf_checkpoint."""
+"""Script to load and run a quantized Qwen3Omni model from export_hf_checkpoint or mto.save()."""
 
 import argparse
 import time
@@ -32,14 +32,28 @@ mto.enable_huggingface_checkpointing()
 
 
 def main(args):
-    print(f"Loading quantized model from {args.checkpoint_path}...")
-    model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-        args.checkpoint_path,
-        torch_dtype="auto",
-        device_map="auto",
-        attn_implementation="flash_attention_2",
-        trust_remote_code=True,
-    )
+    if args.pt_checkpoint_path:
+        # Load base model first, then restore quantization state from mto.save() checkpoint
+        print("Loading base model from Qwen/Qwen3-Omni-30B-A3B-Thinking...")
+        model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+            "Qwen/Qwen3-Omni-30B-A3B-Thinking",
+            torch_dtype="auto",
+            device_map="auto",
+            attn_implementation="flash_attention_2",
+            trust_remote_code=True,
+        )
+        print(f"Restoring quantization state from {args.pt_checkpoint_path}...")
+        model = mto.restore(model, args.pt_checkpoint_path)
+    else:
+        # Load from HF checkpoint exported with export_hf_checkpoint()
+        print(f"Loading quantized model from {args.hf_checkpoint_path}...")
+        model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+            args.hf_checkpoint_path,
+            torch_dtype="auto",
+            device_map="auto",
+            attn_implementation="flash_attention_2",
+            trust_remote_code=True,
+        )
 
     model.disable_talker()
 
@@ -103,10 +117,16 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run quantized Qwen3Omni model")
     parser.add_argument(
-        "--checkpoint_path",
+        "--hf_checkpoint_path",
         type=str,
-        required=True,
+        default=None,
         help="Path to the export_hf_checkpoint() quantized checkpoint directory",
+    )
+    parser.add_argument(
+        "--pt_checkpoint_path",
+        type=str,
+        default=None,
+        help="Path to the mto.save() checkpoint file",
     )
     parser.add_argument(
         "--prompt",
@@ -122,4 +142,9 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    # Validate arguments
+    if not args.hf_checkpoint_path and not args.pt_checkpoint_path:
+        parser.error("Either --hf_checkpoint_path or --pt_checkpoint_path must be provided")
+
     main(args)

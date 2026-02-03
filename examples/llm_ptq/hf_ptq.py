@@ -574,6 +574,15 @@ def mono_quantize(
         quant_cfg["quant_cfg"]["*radio*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
 
+    # For Qwen3Omni models, disable quantization of conv layers
+    if model_type == "qwen3omni":
+        print(
+            "Disabling quantization for conv layers, audio tower and visual encoder in Qwen3Omni model"
+        )
+        quant_cfg["quant_cfg"]["*conv*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["*audio_tower*"] = {"enable": False}
+        quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
+
     if not model_is_already_quantized or calibration_only:
         if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
             print("Applying nvfp4 quantization (MoE only) for gpt-oss")

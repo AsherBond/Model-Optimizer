@@ -26,11 +26,31 @@ import argparse
 import os
 import shutil
 
+# import vllm.model_executor.parameter as vllm_param
 from huggingface_hub import snapshot_download
 from transformers import Qwen3OmniMoeProcessor
 from vllm import LLM, SamplingParams
 
 MODEL_ID = "Qwen/Qwen3-Omni-30B-A3B-Thinking"
+
+
+# # Debug patch to identify which weights cause shape mismatch
+# def _patch_weight_loader_for_debug():
+#     """Monkey-patch vLLM weight loader to print debug info on shape mismatch."""
+#     original_load_column_parallel = vllm_param.ModelWeightParameter.load_column_parallel_weight
+
+#     def debug_load_column_parallel(self, loaded_weight):
+#         print(f"Loading param: {getattr(self, 'name', getattr(self, '_name', repr(self)))}")
+#         print(f"  Parameter shape (expected): {self.data.shape}")
+#         print(f"  Loaded weight shape (got):  {loaded_weight.shape}")
+
+#         return original_load_column_parallel(self, loaded_weight)
+
+#     vllm_param.ModelWeightParameter.load_column_parallel_weight = debug_load_column_parallel
+#     print("DEBUG: Patched vLLM weight loader to print shape mismatch info")
+
+
+# _patch_weight_loader_for_debug()
 
 # Files needed for tokenizer/processor that vLLM loads from model path
 TOKENIZER_FILES = [
@@ -111,8 +131,7 @@ def main():
         tensor_parallel_size=args.tp,
         max_model_len=args.max_model_len,
         trust_remote_code=True,
-        # Disable talker (audio generation) - text output only
-        # enable_talker=False,
+        quantization="modelopt_fp4",
     )
 
     sampling_params = SamplingParams(
