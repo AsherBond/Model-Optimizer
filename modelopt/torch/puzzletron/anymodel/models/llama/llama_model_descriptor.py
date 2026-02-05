@@ -21,10 +21,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 from transformers.models.llama.modeling_llama import (
-    LlamaAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,
-    LlamaMLP,
     LlamaRotaryEmbedding,
 )
 
@@ -94,11 +92,11 @@ class LlamaModelDescriptor(ModelDescriptor):
         return {
             "layer_pattern": "model.layers.{layer_idx}",
             "attention": {
-                "module_classes": [LlamaAttention],
+                "module_classes": ["LlamaAttention"],
                 "include_by_name": ["input_layernorm.weight"],
             },
             "ffn": {
-                "module_classes": [LlamaMLP],
+                "module_classes": ["LlamaMLP"],
                 "include_by_name": ["post_attention_layernorm.weight"],
             },
             "global_modules": {

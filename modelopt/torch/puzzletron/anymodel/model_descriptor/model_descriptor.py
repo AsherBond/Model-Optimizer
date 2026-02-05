@@ -146,11 +146,11 @@ class ModelDescriptor(ABC):
             >>> {
             ...     "layer_pattern": "model.layers.{layer_idx}",
             ...     "attention": {
-            ...         "module_classes": [LlamaAttention],
+            ...         "module_classes": ["LlamaAttention"],
             ...         "include_by_name": ["input_layernorm.weight"],
             ...     },
             ...     "ffn": {
-            ...         "module_classes": [LlamaMLP],
+            ...         "module_classes": ["LlamaMLP"],
             ...         "include_by_name": ["post_attention_layernorm.weight"],
             ...     },
             ...     "global_modules": {
@@ -158,6 +158,15 @@ class ModelDescriptor(ABC):
             ...         "lm_head": ["model.norm.weight", "lm_head.weight"],
             ...     },
             ... }
+
+        Format:
+            - layer_pattern: Template string with {layer_idx} placeholder
+            - attention/ffn: Subblock definitions
+              - module_classes: List of module class names (strings) to classify
+              - include_by_name: List of full weight names to include (e.g., "norm.weight")
+            - global_modules: Non-layer weights
+              - embeddings: List of full weight names for embeddings
+              - lm_head: List of full weight names for output head
         """
         return None
 

@@ -185,21 +185,22 @@ class StructureBasedWeightClassifier:
             layers = getattr(layers, attr)
 
         # Classify by module type for each layer
-        attention_classes = structure["attention"].get("module_classes", [])
-        ffn_classes = structure["ffn"].get("module_classes", [])
+        # module_classes should be a list of class name strings (e.g., ["LlamaAttention"])
+        attention_class_names = set(structure["attention"].get("module_classes", []))
+        ffn_class_names = set(structure["ffn"].get("module_classes", []))
 
         per_layer_map = {}
         for layer_idx in range(num_hidden_layers):
             layer = layers[layer_idx]
             layer_map = {}
 
-            # Phase 1: Classify modules by their class type
+            # Phase 1: Classify modules by their class name
             for module_name, module in layer.named_children():
-                module_type = type(module)
+                module_class_name = type(module).__name__
 
-                if module_type in attention_classes:
+                if module_class_name in attention_class_names:
                     layer_map[module_name] = "attention"
-                elif module_type in ffn_classes:
+                elif module_class_name in ffn_class_names:
                     layer_map[module_name] = "ffn"
 
             # Phase 2: Apply include_by_name for modules not yet classified

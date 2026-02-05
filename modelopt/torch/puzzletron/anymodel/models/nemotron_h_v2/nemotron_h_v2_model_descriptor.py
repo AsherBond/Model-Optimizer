@@ -151,20 +151,15 @@ class NemotronHV2ModelDescriptor(ModelDescriptor):
         All three share the same parent path "mixer".
         The `norm.weight` is shared and classified based on the mixer type in that layer.
         """
-        # Import dynamically loaded modules
-        mamba_classes = get_dynamic_modules("NemotronHMamba2Mixer")
-        attention_classes = get_dynamic_modules("NemotronHAttention")
-        mlp_classes = get_dynamic_modules("NemotronHMLP")
-
         return {
             "layer_pattern": "backbone.layers.{layer_idx}",
             "attention": {
                 # Both Mamba and Attention count as "attention" subblock
-                "module_classes": mamba_classes + attention_classes,
+                "module_classes": ["NemotronHMamba2Mixer", "NemotronHAttention"],
                 "include_by_name": ["norm.weight"],  # Shared norm, assigned per-layer
             },
             "ffn": {
-                "module_classes": mlp_classes,
+                "module_classes": ["NemotronHMLP"],
                 "include_by_name": ["norm.weight"],  # Shared norm, assigned per-layer
             },
             "global_modules": {
