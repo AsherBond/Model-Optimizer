@@ -488,8 +488,7 @@ def main() -> None:
 
     model_type = ModelType(args.model)
     if args.backbone is None:
-        args.backbone = MODEL_DEFAULTS[model_type]["backbone"]
-
+        args.backbone = [MODEL_DEFAULTS[model_type]["backbone"]]
     s = time.time()
 
     model_dtype = {"default": DataType(args.model_dtype).torch_dtype}
