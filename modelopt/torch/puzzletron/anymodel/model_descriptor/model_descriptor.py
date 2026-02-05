@@ -16,12 +16,14 @@
 import re
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import Any, Dict, Iterable, List, Type
+from typing import Any, Dict, Iterable, List, Optional, Type
 
 import torch.nn as nn
 
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
 from modelopt.torch.puzzletron.utils.dummy_modules import DummyBlock
+
+from .structure_based_weight_classifier import StructureBasedWeightClassifier
 
 __all__ = ["ModelDescriptor"]
 
@@ -130,6 +132,35 @@ class ModelDescriptor(ABC):
         """Return the name of the decoder layer at the given index."""
         raise NotImplementedError
 
+    @classmethod
+    def layer_structure(cls) -> Optional[Dict[str, Any]]:
+        """Define model structure for class-based weight classification.
+
+        Override this method to use the new structure-based approach instead of
+        regex-based layer_name_predicates().
+
+        Returns:
+            Dictionary defining model structure, or None to use layer_name_predicates().
+
+        Example for Llama:
+            >>> {
+            ...     "layer_pattern": "model.layers.{layer_idx}",
+            ...     "attention": {
+            ...         "module_classes": [LlamaAttention],
+            ...         "include_by_name": ["input_layernorm.weight"],
+            ...     },
+            ...     "ffn": {
+            ...         "module_classes": [LlamaMLP],
+            ...         "include_by_name": ["post_attention_layernorm.weight"],
+            ...     },
+            ...     "global_modules": {
+            ...         "embeddings": ["model.embed_tokens.weight"],
+            ...         "lm_head": ["model.norm.weight", "lm_head.weight"],
+            ...     },
+            ... }
+        """
+        return None
+
     @staticmethod
     @abstractmethod
     def layer_name_predicates(num_layers: int) -> Dict[str, re.Pattern]:
@@ -180,25 +211,58 @@ class ModelDescriptor(ABC):
 
     @classmethod
     def get_weight_groups(
-        cls, layer_names: Iterable[str], num_hidden_layers: int
+        cls,
+        layer_names: Iterable[str],
+        num_hidden_layers: int,
+        model: Optional[nn.Module] = None,
     ) -> Dict[str, List[str]]:
         """Group model weights to support the puzzle subblock checkpointing format.
 
-        This method uses the abstract method `layer_name_predicates` by default.
+        This method uses layer_structure() if implemented, otherwise falls back to
+        layer_name_predicates() for backwards compatibility.
 
         Args:
             layer_names: state_dict layer names of the model.
             num_hidden_layers: number of decoder layers in the model.
+            model: Model loaded with device_map="meta" (required if using layer_structure())
 
         Returns:
             Dictionary of group names to list of layer names per group, e.g.:
             >>> {
-            ...     "embedding": ["model.embed_tokens.weight"],
+            ...     "embeddings": ["model.embed_tokens.weight"],
             ...     "lm_head": ["lm_head.weight", "model.norm.weight"],
             ...     "block_0_ffn": ["model.layers.0.mlp.down_proj", ...],
             ...     "block_0_attention": ["model.layers.0.self_attn.q_proj", ...],
             ... }
         """
+        # Try new approach first
+        structure = cls.layer_structure()
+
+        if structure is not None:
+            # Use class-based classification with model inspection
+            if model is None:
+                raise ValueError(
+                    f"{cls.__name__} uses layer_structure() which requires model parameter"
+                )
+
+            # Delegate to StructureBasedWeightClassifier
+
+            return StructureBasedWeightClassifier.classify_weights(
+                model=model,
+                structure=structure,
+                weight_names=layer_names,
+                num_hidden_layers=num_hidden_layers,
+                descriptor_class_name=cls.__name__,
+            )
+        else:
+            # Fall back to old regex-based approach
+            return cls._get_weight_groups_from_predicates(layer_names, num_hidden_layers)
+
+    @classmethod
+    def _get_weight_groups_from_predicates(
+        cls, layer_names: Iterable[str], num_hidden_layers: int
+    ) -> Dict[str, List[str]]:
+        """Group weights using layer_name_predicates()"""
         weight_groups = defaultdict(list)
         for name in layer_names:
             for group, pattern in cls.layer_name_predicates(num_hidden_layers).items():

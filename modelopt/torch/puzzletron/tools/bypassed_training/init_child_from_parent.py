@@ -170,6 +170,7 @@ def init_child_from_parent(
         output_checkpoint_dir,
         descriptor,
         max_workers=max_workers,
+        model=child_model,
     )
     save_checkpoint_time = time.time() - start_time
     mprint(f"_save_checkpoint completed in {save_checkpoint_time:.2f} seconds")

@@ -26,7 +26,7 @@ from typing import Dict, List
 
 from safetensors.torch import load_file, save_file
 from tqdm import tqdm
-from transformers import PretrainedConfig
+from transformers import AutoModelForCausalLM, PretrainedConfig
 
 from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
 from modelopt.torch.puzzletron.decilm.deci_lm_hf_code.block_config import BlockConfig
@@ -74,9 +74,19 @@ class Converter(ABC):
         for name, file in param_to_file.items():
             file_to_params[file].add(name)
 
-        # Determine subblocks needed
+        # Load model structure for weight classification
+        # TODO: Support VLM models by using _get_model_class_from_config() from sharded_checkpoint_utils.py
+        model = AutoModelForCausalLM.from_pretrained(
+            input_dir,
+            device_map="meta",
+            trust_remote_code=True,
+        )
+
+        # Determine subblocks needed (pass model_path for layer_structure() approach)
         subblocks = descriptor.get_weight_groups(
-            all_param_names, num_hidden_layers=num_hidden_layers
+            all_param_names,
+            num_hidden_layers=num_hidden_layers,
+            model=model,
         )
 
         # Output directory

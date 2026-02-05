@@ -19,7 +19,7 @@ import pkgutil
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Type
+from typing import Any, Dict, Iterable, List, Type
 
 import torch.nn as nn
 
@@ -140,86 +140,38 @@ class NemotronHV2ModelDescriptor(ModelDescriptor):
         return f"backbone.layers.{index}"
 
     @classmethod
-    def get_weight_groups(
-        cls, layer_names: Iterable[str], num_hidden_layers: int
-    ) -> Dict[str, List[str]]:
+    def layer_structure(cls) -> Dict[str, Any]:
+        """Define Nemotron-H v2 model structure using class-based approach.
+
+        Nemotron-H is a hybrid architecture where each layer can be:
+        - Mamba (SSM): Uses NemotronHMamba2Mixer
+        - Attention: Uses NemotronHAttention
+        - MLP (FFN): Uses NemotronHMLP
+
+        All three share the same parent path "mixer".
+        The `norm.weight` is shared and classified based on the mixer type in that layer.
         """
-        Problem with NemotronH is that `norm.weight` can be in both block_{i}_ffn and block_{i}_attention. duplicate groups with `norm.weight` should be removed.
-        """
-        weight_groups = defaultdict(list)
-        for name in layer_names:
-            is_matched = False
-            for group, pattern in cls.layer_name_predicates(num_hidden_layers).items():
-                if pattern.match(name):
-                    weight_groups[group].append(name)
-                    is_matched = True
-            if not is_matched:
-                raise ValueError(f"Couldn't find a match for {name}")
+        # Import dynamically loaded modules
+        mamba_classes = get_dynamic_modules("NemotronHMamba2Mixer")
+        attention_classes = get_dynamic_modules("NemotronHAttention")
+        mlp_classes = get_dynamic_modules("NemotronHMLP")
 
-        valid_weight_groups = {}
-        for group, names in weight_groups.items():
-            if len(names) == 1:
-                only_name = names[0]
-                if only_name.endswith("norm.weight") and "layers" in only_name:
-                    # Skip and don't append this group to valid_weight_groups
-                    continue
-            valid_weight_groups[group] = names
-
-        return valid_weight_groups
-
-    @staticmethod
-    def layer_name_predicates(num_layers: int) -> Dict[str, re.Pattern]:
-        layer_name_patterns = {
-            "embeddings": re.compile(
-                r"^(model\.embed_tokens\.weight|backbone\.embeddings\.weight)$"
-            ),
-            "lm_head": re.compile(r"^(lm_head\.weight|backbone\.norm_f\.weight)$"),
+        return {
+            "layer_pattern": "backbone.layers.{layer_idx}",
+            "attention": {
+                # Both Mamba and Attention count as "attention" subblock
+                "module_classes": mamba_classes + attention_classes,
+                "include_by_name": ["norm.weight"],  # Shared norm, assigned per-layer
+            },
+            "ffn": {
+                "module_classes": mlp_classes,
+                "include_by_name": ["norm.weight"],  # Shared norm, assigned per-layer
+            },
+            "global_modules": {
+                "embeddings": ["backbone.embeddings.weight"],
+                "lm_head": ["backbone.norm_f.weight", "lm_head.weight"],
+            },
         }
-
-        def build_ffn_predicates() -> Dict[str, re.Pattern]:
-            return {
-                f"block_{layer_idx}_ffn": re.compile(
-                    rf"^backbone\.layers\.{layer_idx}\."
-                    r"(norm\.weight|"  # ← INCLUDED IN FFN
-                    r"mixer\.(gate\.e_score_correction_bias"
-                    r"|gate\.weight"
-                    r"|experts\.\d+\.up_proj\.weight"
-                    r"|experts\.\d+\.down_proj\.weight"
-                    r"|shared_experts\.up_proj\.weight"
-                    r"|shared_experts\.down_proj\.weight"
-                    r"|up_proj\.weight"  # Simple MLP (non-MoE)
-                    r"|down_proj\.weight))$"  # Simple MLP (non-MoE)
-                )
-                for layer_idx in range(num_layers)
-            }
-
-        def build_attention_predicates() -> Dict[str, re.Pattern]:
-            return {
-                f"block_{layer_idx}_attention": re.compile(
-                    rf"^backbone\.layers\.{layer_idx}\."
-                    r"(norm\.weight|"  # ← INCLUDED IN ATTENTION
-                    r"mixer\.(norm\.weight"
-                    r"|A_log"
-                    r"|D"
-                    r"|conv1d\.weight"
-                    r"|conv1d\.bias"
-                    r"|dt_bias"
-                    r"|in_proj\.weight"
-                    r"|out_proj\.weight"
-                    r"|q_proj\.weight"
-                    r"|k_proj\.weight"
-                    r"|v_proj\.weight"
-                    r"|o_proj\.weight))$"
-                )
-                for layer_idx in range(num_layers)
-            }
-
-        layer_name_patterns.update(
-            **build_ffn_predicates(),
-            **build_attention_predicates(),
-        )
-
-        return layer_name_patterns
 
     @staticmethod
     def pruning_mixins() -> Dict[str, PruningMixIn]:

@@ -29,10 +29,11 @@ import warnings
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Optional
 
 import torch
 from safetensors.torch import save_file as safe_save_file
+from torch import nn
 from transformers import AutoConfig, PretrainedConfig, PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -147,7 +148,7 @@ def save_checkpoint(
     checkpoint_dir: Path | str,
     descriptor: "ModelDescriptor",
 ) -> None:
-    _save_checkpoint(model.config, model.state_dict(), checkpoint_dir, descriptor)
+    _save_checkpoint(model.config, model.state_dict(), checkpoint_dir, descriptor, model=model)
 
 
 def _save_checkpoint(
@@ -156,6 +157,9 @@ def _save_checkpoint(
     checkpoint_dir: Path | str,
     descriptor: "ModelDescriptor",
     max_workers: int | None = None,  # Now optional - will auto-calculate if None
+    model: Optional[
+        nn.Module
+    ] = None,  # Optional: model for structure inspection (layer_structure())
 ) -> None:
     from modelopt.torch.puzzletron.anymodel.model_descriptor import ModelDescriptor
 
@@ -171,6 +175,7 @@ def _save_checkpoint(
     subblock_keys = descriptor.get_weight_groups(
         layer_names=state_dict.keys(),
         num_hidden_layers=model_config.num_hidden_layers,
+        model=model,
     )
 
     weight_map = {}
