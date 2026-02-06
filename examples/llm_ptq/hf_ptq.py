@@ -63,14 +63,12 @@ from modelopt.torch.utils.dataset_utils import (
     create_forward_loop,
     get_dataset_dataloader,
     get_max_batch_size,
-    get_qwen3omni_text_dataloader,
     get_supported_datasets,
 )
 from modelopt.torch.utils.image_processor import (
     BaseImageProcessor,
     MllamaImageProcessor,
     Qwen3OmniImageProcessor,
-    Qwen3OmniTextProcessor,
 )
 from modelopt.torch.utils.memory_monitor import launch_memory_monitor
 from modelopt.torch.utils.speech_dataset_utils import get_speech_dataset_dataloader
@@ -196,50 +194,47 @@ def make_calib_dataloader(
             num_samples=args.calib_size[0],
         )
     elif model_type == "qwen3omni":
-        assert processor is not None, "The processor must be set for qwen3omni model."
         dataset_name = args.dataset[0] if args.dataset else "cnn_dailymail"
         # Check if using video dataset (e.g., finevideo)
-        if dataset_name in get_supported_video_datasets():
-            video_processor = Qwen3OmniVideoProcessor(
-                processor.tokenizer if hasattr(processor, "tokenizer") else processor,
-                device=device,
-                dtype=language_model.dtype,
-                use_audio_in_video=True,
-            )
-            calib_dataloader = get_video_dataset_dataloader(
-                dataset_name=dataset_name,
-                processor=video_processor,
-                batch_size=args.batch_size,
-                num_samples=args.calib_size[0],
-            )
-        elif dataset_name in get_supported_vlm_datasets():
-            assert isinstance(processor, Qwen3OmniImageProcessor), (
-                "The Qwen3OmniImageProcessor must be set."
-            )
-            # Set the dtype for proper tensor conversion in collate_function
-            processor.dtype = language_model.dtype
-            calib_dataloader = get_vlm_dataset_dataloader(
-                dataset_name=dataset_name,
-                processor=processor,
-                batch_size=args.batch_size,
-                num_samples=args.calib_size[0],
-            )
+        if processor is not None:
+            if dataset_name in get_supported_video_datasets():
+                video_processor = Qwen3OmniVideoProcessor(
+                    processor.tokenizer if hasattr(processor, "tokenizer") else processor,
+                    device=device,
+                    dtype=language_model.dtype,
+                    use_audio_in_video=True,
+                )
+                calib_dataloader = get_video_dataset_dataloader(
+                    dataset_name=dataset_name,
+                    processor=video_processor,
+                    batch_size=args.batch_size,
+                    num_samples=args.calib_size[0],
+                )
+            elif dataset_name in get_supported_vlm_datasets():
+                assert isinstance(processor, Qwen3OmniImageProcessor), (
+                    "The Qwen3OmniImageProcessor must be set."
+                )
+                # Set the dtype for proper tensor conversion in collate_function
+                processor.dtype = language_model.dtype
+                calib_dataloader = get_vlm_dataset_dataloader(
+                    dataset_name=dataset_name,
+                    processor=processor,
+                    batch_size=args.batch_size,
+                    num_samples=args.calib_size[0],
+                )
         else:
-            # Text-only datasets (e.g., cnn_dailymail)
-            # Use Qwen3OmniTextProcessor to apply proper conversation template
-            # See: https://huggingface.co/Qwen/Qwen3-Omni-30B-A3B-Thinking
-            text_processor = Qwen3OmniTextProcessor(
-                processor=processor.tokenizer,  # Pass the underlying HF processor
-                device=device,
-                dtype=language_model.dtype,
+            # Labels are only needed for gradient-based auto_quantize
+            include_labels = (
+                args.auto_quantize_bits is not None and args.auto_quantize_method == "gradient"
             )
-            calib_dataloader = get_qwen3omni_text_dataloader(
-                dataset_name=dataset_name,
-                processor=text_processor,
+            calib_dataloader = get_dataset_dataloader(
+                dataset_name=args.dataset,
+                tokenizer=tokenizer,
                 batch_size=args.batch_size,
-                num_samples=args.calib_size[0],
+                num_samples=args.calib_size,
+                device=device,
+                include_labels=include_labels,
             )
-        print(f"Selected dataset for calibration: {dataset_name}")
     elif model_type == "whisper":
         assert processor is not None and isinstance(processor, WhisperProcessor), (
             "The AutoProcessor must be set."
@@ -410,9 +405,6 @@ def load_model(args: argparse.Namespace):
         calibration_only = True
 
     model_type = get_model_type(full_model)
-    if model_type == "qwen3omni":
-        print("Disabling talker for Qwen3Omni model")
-        full_model.disable_talker()
 
     device = full_model.device
     if hasattr(full_model, "model"):
@@ -432,6 +424,14 @@ def load_model(args: argparse.Namespace):
             trust_remote_code=args.trust_remote_code,
             attn_implementation=args.attn_implementation,
         )
+        if model_type == "qwen3omni":
+            print("Disabling talker for Qwen3Omni model")
+            full_model.disable_talker()
+            language_model = full_model.thinker.model
+            tokenizer = processor.tokenizer.tokenizer
+            processor = None
+            default_padding_side = tokenizer.padding_side
+            default_pad_token = tokenizer.pad_token
     elif model_type == "whisper":
         processor = get_processor(
             args.pyt_ckpt_path,
@@ -567,6 +567,7 @@ def mono_quantize(
         quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
 
     # For Qwen3Omni models, disable quantization of conv layers
+    generation_kwargs = {}
     if model_type == "qwen3omni":
         print(
             "Disabling quantization for conv layers, audio tower and visual encoder in Qwen3Omni model"
@@ -574,6 +575,8 @@ def mono_quantize(
         quant_cfg["quant_cfg"]["*conv*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*audio_tower*"] = {"enable": False}
         quant_cfg["quant_cfg"]["*visual*"] = {"enable": False}
+        generation_kwargs["return_audio"] = False
+        generation_kwargs["thinker_max_new_tokens"] = 1
 
     if not model_is_already_quantized or calibration_only:
         if model_type == "gptoss" and args.qformat == "nvfp4_mlp_only":
@@ -592,7 +595,9 @@ def mono_quantize(
             if args.calib_with_images and is_nemotron_vl_model:
                 calibrate_loop = create_vlm_calibration_loop(full_model, calib_dataloader)
             else:
-                calibrate_loop = create_forward_loop(dataloader=calib_dataloader)
+                calibrate_loop = create_forward_loop(
+                    dataloader=calib_dataloader, generation_kwargs=generation_kwargs
+                )
 
         if calibration_only:
             language_model = mtq.calibrate(
@@ -756,7 +761,7 @@ def pre_quantize(
     elif model_type == "qwen3omni":
         # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
         # Pass full batch with all multimodal inputs
-        result = full_model.generate(**calib_batch, max_new_tokens=100)
+        result = full_model.generate(**calib_batch, return_audio=False, thinker_max_new_tokens=100)
         if isinstance(result, tuple):
             text_ids, _ = result
             generated_ids_before_ptq = (
@@ -817,7 +822,7 @@ def post_quantize(
     elif model_type == "qwen3omni":
         # Qwen3Omni returns (text_ids, audio) tuple; text_ids has .sequences
         # Pass full batch with all multimodal inputs
-        result = full_model.generate(**calib_batch, max_new_tokens=100)
+        result = full_model.generate(**calib_batch, return_audio=False, thinker_max_new_tokens=100)
         if isinstance(result, tuple):
             text_ids, _ = result
             generated_ids_after_ptq = (

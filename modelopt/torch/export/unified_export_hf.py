@@ -319,7 +319,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
         if getattr(model.config, "is_encoder_decoder", False):
             # For encoder-decoder models, we need to pass both the encoder and decoder input ids
             model(fake_input, decoder_input_ids=decoder_fake_input)
-        elif is_vl_model and "nemotron" in model_type:
+        elif (is_vl_model and "nemotron" in model_type) or model_type.startswith("qwen3omni"):
             # For Nemotron VL models, try to run optimization on just the language model part
             language_model_lineage = get_language_model_from_vl(model)
 
@@ -333,7 +333,7 @@ def requantize_resmooth_fused_llm_layers(model: torch.nn.Module):
                 language_model(fake_input)
             else:
                 raise ValueError(
-                    f"Cannot extract language_model from Nemotron VL model (type: {model_type}). "
+                    f"Cannot extract language_model from VL model (type: {model_type}). "
                     "This is required for requantization/resmoothing optimization. "
                     "Please ensure the model architecture is supported or file an issue."
                 )
