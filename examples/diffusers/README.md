@@ -89,7 +89,7 @@ We support calibration for INT8, FP8 and FP4 precision and for both weights and 
 We also provide instructions on deploying and running E2E diffusion pipelines with Model Optimizer quantized INT8 and FP8 Backbone to generate images and measure latency on target GPUs. Note, Jetson devices are not supported at this time due to the incompatibility of the software.
 
 > [!NOTE]
-> Model calibration requires relatively more GPU computing power then deployment. It does not need to be on the same GPUs as the deployment target GPUs. ONNX export and TensorRT engine instructions live in [`quantization/ONNX.md`](./quantization/ONNX.md).
+> Model calibration requires relatively more GPU computing power then deployment. It does not need to be on the same GPUs as the deployment target GPUs. ONNX export and TensorRT engine instructions live in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
 
 ### Quantize scripts
 
@@ -136,7 +136,7 @@ python quantize.py \
 - `calib-size`: For SDXL INT8, we recommend 32 or 64, for SDXL FP8, 128 is recommended.
 - `n_steps`: Recommendation: SD/SDXL 20 or 30, SDXL-Turbo 4.
 
-**You can use the generated checkpoint directly in PyTorch, export a Hugging Face checkpoint (`--hf-ckpt-dir`) to deploy the model on SGLang/vLLM/TRTLLM, or follow the ONNX/TensorRT workflow in [`quantization/ONNX.md`](./quantization/ONNX.md).**
+**You can use the generated checkpoint directly in PyTorch, export a Hugging Face checkpoint (`--hf-ckpt-dir`) to deploy the model on SGLang/vLLM/TRTLLM, or follow the ONNX/TensorRT workflow in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).**
 
 ## Quantization Aware Training (QAT)
 
@@ -223,7 +223,7 @@ transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
 
 ## Build and Run with TensorRT Compiler Framework
 
-ONNX export and TensorRT engine instructions are documented in [`quantization/ONNX.md`](./quantization/ONNX.md).
+ONNX export and TensorRT engine instructions are documented in [`quantization/ONNX-TRT-Deployment.md`](./quantization/ONNX-TRT-Deployment.md).
 
 ### LoRA
 
