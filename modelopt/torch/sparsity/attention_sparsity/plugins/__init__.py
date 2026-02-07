@@ -15,18 +15,24 @@
 
 """Plugins for sparse attention integration with various frameworks."""
 
-# List of model plugins that are called during conversion
-# Each plugin is a callable that takes (model) and performs validation/setup
+from modelopt.torch.utils import import_plugin
+
+# Set of model plugins that are called during conversion.
+# Matches the convention used by quantization and peft plugin registries.
 CUSTOM_MODEL_PLUGINS: set = set()
 
 
 def register_custom_model_plugins_on_the_fly(model):
-    """Applies all registered custom model plugins."""
+    """Applies all registered custom model plugins in order."""
     for callback in CUSTOM_MODEL_PLUGINS:
         callback(model)
 
 
+# Import plugins
 from . import huggingface  # noqa: E402
+
+with import_plugin("ltx2"):
+    from . import ltx2
 
 __all__ = [
     "CUSTOM_MODEL_PLUGINS",

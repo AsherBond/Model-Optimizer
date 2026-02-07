@@ -34,10 +34,10 @@ class DynamicThresholdCalibrator:
     """Dynamic threshold calibrator using Inverse Power model.
 
     Calibration Algorithm:
-        1. For each threshold λ_j in threshold_trials:
+        1. For each threshold lambda_j in threshold_trials:
            - Run ALL samples through forward_loop
            - For each sample i with length L_i, collect sparsity S_ij
-           - Compute scale_factor_ij = λ_j × L_i
+           - Compute scale_factor_ij = lambda_j x L_i
 
         2. Fit Inverse Power model to ALL individual (sf_ij, S_ij) pairs:
            scale_factor = k / (1 - sparsity)^p
@@ -48,7 +48,7 @@ class DynamicThresholdCalibrator:
         scale_factor = k / (1 - S*)^p
         threshold = scale_factor / seqlen
 
-    Key insight: Using all individual data points (N_thresholds × N_samples)
+    Key insight: Using all individual data points (N_thresholds x N_samples)
     instead of per-threshold averages provides more accurate fitting without
     additional calibration time cost.
     """
@@ -91,9 +91,9 @@ class DynamicThresholdCalibrator:
         """Calibrate k and p parameters for Inverse Power model.
 
         Algorithm:
-            1. For each threshold λ_j in threshold_trials:
+            1. For each threshold lambda_j in threshold_trials:
                - Run ALL samples, collect sparsities S_ij for each sample i
-               - Compute scale_factor_ij = λ_j × L_i (where L_i is sample length)
+               - Compute scale_factor_ij = lambda_j x L_i (where L_i is sample length)
 
             2. Fit Inverse Power model to ALL (sf_ij, S_ij) pairs:
                scale_factor = k / (1 - sparsity)^p
