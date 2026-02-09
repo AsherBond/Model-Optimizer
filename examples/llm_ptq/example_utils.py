@@ -316,10 +316,10 @@ def get_processor(
     return None
 
 
-def load_mtp_weights_if_needed(
+def load_mtp_weights(
     model: torch.nn.Module, model_path: str
 ) -> tuple[list[str], dict[str, torch.Tensor]]:
-    """Load MTP weights from separate safetensors if needed (e.g., GLM-4.7).
+    """Load MTP weights from the model checkpoint.
 
     Some models store additional layers in separate safetensors files with non-standard
     names (e.g., mtp.safetensors). HuggingFace's from_pretrained() may not load these
@@ -335,6 +335,7 @@ def load_mtp_weights_if_needed(
         List of layer prefixes that were loaded from non-standard safetensors files.
         These layers should typically be excluded from quantization.
         Empty list if no additional weights were loaded.
+        Dictionary of MTP weights that were not loaded into the model state dict.
     """
     model_path = Path(model_path)
     index_file = model_path / "model.safetensors.index.json"
@@ -564,14 +565,6 @@ def get_model(
 
     if device == "cuda" and not is_model_on_gpu(model):
         print("Warning: Some parameters are not on a GPU. Calibration can be slow or hit OOM")
-
-    # Load any missing weights from non-standard safetensors files (e.g., GLM-4.7's mtp.safetensors)
-    # Store the MTP layer prefixes on the model for later exclusion from quantization
-    mtp_layer_prefixes, mtp_state_dict = load_mtp_weights_if_needed(model, ckpt_path)
-    if mtp_layer_prefixes:
-        model._mtp_layer_prefixes = mtp_layer_prefixes
-    if mtp_state_dict:
-        model._mtp_state_dict = mtp_state_dict
 
     return model
 
