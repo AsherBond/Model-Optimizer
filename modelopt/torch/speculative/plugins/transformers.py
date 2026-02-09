@@ -230,7 +230,7 @@ class ParallelDraft(nn.Module):
 class EagleModule(nn.Module):
     """Eagle module used in EAGLE model."""
 
-    def __init__(self, config, decoder_layer_cls, bias=False):
+    def __init__(self, config, decoder_layer_cls, bias=False, draft_vocab_cache=None):
         """Init function for EagleModule."""
         super().__init__()
         self.config = config
@@ -241,26 +241,27 @@ class EagleModule(nn.Module):
         if config.use_last_layernorm:
             self.norm = LlamaRMSNorm(config.hidden_size, config.rms_norm_eps)
 
-        # Optionally, we use a smaller vocab table for eagle module
-        if config.draft_vocab_size != config.vocab_size or config.has_lm_head:
-            # Need an extra lm_head for eagle module since vocab size is reduced.
-            assert config.draft_vocab_size <= config.vocab_size, (
-                "EAGLE module's vocab size should be <= base model vocab size!"
+        # Load draft vocab cache if provided
+        if draft_vocab_cache is not None:
+            if not os.path.isfile(draft_vocab_cache):
+                raise FileNotFoundError(
+                    f"Draft vocab cache provided but not found: {draft_vocab_cache}"
+                )
+            d2t = torch.load(draft_vocab_cache)
+            if d2t.shape[0] > config.vocab_size:
+                raise ValueError(
+                    f"Draft vocab cache size {d2t.shape[0]} is greater than base model vocab size {config.vocab_size}"
+                )
+            print_rank_0(
+                f"Setting draft_vocab_size to {d2t.shape[0]} due to draft_vocab_cache provided."
             )
+            config.draft_vocab_size = d2t.shape[0]
+            self.register_buffer("d2t", d2t)
+            print_rank_0(f"Loaded draft_vocab_cache from {draft_vocab_cache}.")
+        else:
+            config.draft_vocab_size = config.vocab_size
 
-            # Initialize the buffers to zero.
-            # Their values depend on specific tokenzier and calibrate dataset, and should be set in training script.
-            if config.draft_vocab_size < config.vocab_size:
-                if config.draft_vocab_cache is not None and os.path.isfile(
-                    config.draft_vocab_cache
-                ):
-                    self.register_buffer("d2t", torch.load(config.draft_vocab_cache))
-                    print_rank_0(f"Loaded draft vocab cache from {config.draft_vocab_cache}.")
-                else:
-                    raise FileNotFoundError(
-                        f"Draft vocab cache file not found: {config.draft_vocab_cache}"
-                    )
-
+        if config.draft_vocab_size != config.vocab_size or config.has_lm_head:
             self.lm_head = nn.Linear(
                 config.hidden_size,
                 config.draft_vocab_size,
@@ -536,6 +537,7 @@ class HFEagleModel(EagleModel):
         eagle_loss_decay_factor,
         eagle_architecture_config,
         eagle_decoder_type,
+        draft_vocab_cache,
     ):
         """Constructor.
 
@@ -552,6 +554,7 @@ class HFEagleModel(EagleModel):
             eagle_loss_decay_factor=eagle_loss_decay_factor,
             eagle_architecture_config=eagle_architecture_config,
             eagle_decoder_type=eagle_decoder_type,
+            draft_vocab_cache=draft_vocab_cache,
         )
 
         if eagle_decoder_type == "llama":
@@ -566,9 +569,6 @@ class HFEagleModel(EagleModel):
         self.eagle_config.hidden_size = self._base_llm_config.hidden_size
         self.eagle_config.vocab_size = self._base_llm_config.vocab_size
         self.eagle_config.max_position_embeddings = self._base_llm_config.max_position_embeddings
-        self.eagle_config.draft_vocab_size = getattr(
-            self.eagle_config, "draft_vocab_size", self.eagle_config.vocab_size
-        )
 
         if self.eagle_config._attn_implementation is None:
             self.eagle_config._attn_implementation = "sdpa"
@@ -597,6 +597,7 @@ class HFEagleModel(EagleModel):
         self.eagle_module = EagleModule(
             self.eagle_config,
             decoder_cls,
+            draft_vocab_cache=draft_vocab_cache,
         )
 
         # find base model, lm head, and embeddings paths
@@ -714,7 +715,7 @@ class HFEagleModel(EagleModel):
         dtypemin = torch.finfo(self._base_llm_config.dtype).min
         q_len = seq_length
         kv_len = seq_length * (1 + ttt_step)
-        if self.eagle_module.config._attn_implementation == "flex_attention":
+        if self.eagle_config._attn_implementation == "flex_attention":
             # Return block mask for flex attention
             block_mask = create_block_mask(msk_func, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len)
             return block_mask
@@ -1100,9 +1101,7 @@ class HFEagleModel(EagleModel):
             )
 
             # Use SDPA attention during generation for both stability and performance
-            with temporary_set_config_value(
-                self.eagle_module.config, "_attn_implementation", "sdpa"
-            ):
+            with temporary_set_config_value(self.eagle_config, "_attn_implementation", "sdpa"):
                 _, eagle_prenorm_h, eagle_logits, _ = self._eagle_forward(
                     eagle_input_hidden_states,
                     self._base_model_embeddings(eagle_ids),

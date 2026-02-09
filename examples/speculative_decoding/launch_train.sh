@@ -106,6 +106,10 @@ while [ $# -gt 0 ]; do
       if [[ "$1" != *=* ]]; then shift; fi
       LOG_STEPS="${1#*=}"
       ;;
+    --draft_vocab_cache*)
+      if [[ "$1" != *=* ]]; then shift; fi
+      DRAFT_VOCAB_CACHE="${1#*=}"
+      ;;
     *)
       >&2 printf "Error: Invalid argument ${1#*=}\n"
       exit 1
@@ -143,6 +147,7 @@ ESTIMATE_AR=${ESTIMATE_AR:-False}
 CP_SIZE=${CP_SIZE:-1}
 DP_SHARD_SIZE=${DP_SHARD_SIZE:-$((GPU_COUNT/CP_SIZE))}
 LOG_STEPS=${LOG_STEPS:-100}
+DRAFT_VOCAB_CACHE=${DRAFT_VOCAB_CACHE:-""}
 
 if [[ "$MODE" == "medusa" ]]; then
   SPECULATIVE_ARGS="--medusa_num_heads $MEDUSA_NUM_HEADS --medusa_num_layers $MEDUSA_NUM_LAYERS"
@@ -184,6 +189,13 @@ else
 fi
 
 
+if [[ "$DRAFT_VOCAB_CACHE" != "" ]]; then
+  DRAFT_VOCAB_CACHE_ARGS="--draft_vocab_cache $DRAFT_VOCAB_CACHE"
+else
+  DRAFT_VOCAB_CACHE_ARGS=""
+fi
+
+
 # Disable tokenizers parallelism to avoid warning
 export TOKENIZERS_PARALLELISM=False
 CMD="accelerate launch --mixed_precision bf16 main.py \
@@ -212,6 +224,7 @@ CMD="accelerate launch --mixed_precision bf16 main.py \
     --disable_tqdm $DISABLE_TQDM \
     --estimate_ar $ESTIMATE_AR \
     --ar_validate_steps $AR_VALIDATE_STEPS \
+    $DRAFT_VOCAB_CACHE_ARGS \
     $VLM_ARGS \
     $OFFLINE_TRAINING_ARGS \
     $SPECULATIVE_ARGS \
